@@ -1,0 +1,2 @@
+# MuzanTradeBot Dependencies
+# This file will be populated as features are developed.
