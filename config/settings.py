@@ -10,6 +10,17 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 
+def _env_float(name: str, default: float) -> float:
+    """Read a float from the environment, falling back to ``default`` when
+    the variable is missing or not a valid number. Invalid configuration
+    must never crash the bot or, worse, trade with corrupted numbers."""
+    raw = os.getenv(name, "")
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return default
+
+
 class Settings:
     """Central settings loaded from environment variables."""
 
@@ -31,6 +42,12 @@ class Settings:
     # Bot Modes
     GUARDIAN_MODE: bool = os.getenv("GUARDIAN_MODE", "true").lower() in ("true", "1", "yes")
     PAPER_TRADING: bool = os.getenv("PAPER_TRADING", "true").lower() in ("true", "1", "yes")
+
+    # Risk Profile (Guardian Mode parameters)
+    ACCOUNT_BALANCE: float = _env_float("ACCOUNT_BALANCE", 1000.0)
+    RISK_PERCENT: float = _env_float("RISK_PERCENT", 2.0)
+    STOP_LOSS_PERCENT: float = _env_float("STOP_LOSS_PERCENT", 2.0)
+    TAKE_PROFIT_PERCENT: float = _env_float("TAKE_PROFIT_PERCENT", 4.0)
 
     @classmethod
     def is_configured(cls) -> bool:

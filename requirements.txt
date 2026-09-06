@@ -1,2 +1,3 @@
 # MuzanTradeBot Dependencies
-# This file will be populated as features are developed.
+python-dotenv>=1.0.0
+python-telegram-bot>=22.0

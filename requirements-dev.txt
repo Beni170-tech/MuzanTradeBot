@@ -1,0 +1,2 @@
+# MuzanTradeBot Development Dependencies
+pytest>=8.0.0

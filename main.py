@@ -26,6 +26,18 @@ def main():
     print(f"Paper Trading: {settings.PAPER_TRADING}")
     print("---------------------------------")
 
+    # Validate Telegram token
+    if not settings.TELEGRAM_BOT_TOKEN:
+        print("\n[ERROR] TELEGRAM_BOT_TOKEN is not set.")
+        print("Please add it to your .env file.")
+        print("See .env.example for reference.")
+        sys.exit(1)
+
+    # Start Telegram bot
+    print("\nStarting Telegram bot...")
+    from telegram_bot.bot import run_bot
+    run_bot()
+
 
 if __name__ == "__main__":
     main()
