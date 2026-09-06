@@ -7,7 +7,17 @@ import logging
 from telegram.ext import Application, CommandHandler
 
 from config.settings import settings
-from telegram_bot.handlers import start, help_command, ping, version, analyze
+from telegram_bot.handlers import (
+    start,
+    help_command,
+    ping,
+    version,
+    analyze,
+    paper_command,
+    positions_command,
+    history_command,
+    close_command,
+)
 logger = logging.getLogger(__name__)
 
 
@@ -21,6 +31,10 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("ping", ping))
     app.add_handler(CommandHandler("version", version))
     app.add_handler(CommandHandler("analyze", analyze))
+    app.add_handler(CommandHandler("paper", paper_command))
+    app.add_handler(CommandHandler("positions", positions_command))
+    app.add_handler(CommandHandler("history", history_command))
+    app.add_handler(CommandHandler("close", close_command, pass_args=True))
 
     logger.info("Telegram application built successfully.")
     return app
