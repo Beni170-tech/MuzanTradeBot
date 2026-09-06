@@ -50,6 +50,59 @@ def _format_pnl_label(order: PaperOrder) -> str:
     return "BREAKEVEN"
 
 
+def _before_analysis_paper_check(
+    service: PaperTradingService, symbol: str, current_price: float
+) -> PaperOrder | None:
+    """Check pre-existing paper positions for SL/TP breach.
+
+    Runs BEFORE any new order is placed for the current analysis.
+    Only evaluates positions that existed before this /analyze request.
+    If the current price hits the stop loss, close with STOPPED.
+    If the current price hits the take profit, close with TAKEN_PROFIT.
+    Stop loss takes priority over take profit (Guardian Mode: protect capital).
+    Returns the closed order if a closure happened, else None.
+    """
+    existing = service.get_position(symbol)
+    if existing is None:
+        return None
+
+    side = existing.side.value.upper() if hasattr(existing.side, "value") else str(existing.side).upper()
+
+    # Guard: no valid SL/TP levels configured
+    if existing.stop_loss <= 0 and existing.take_profit <= 0:
+        return None
+
+    closed_order: PaperOrder | None = None
+
+    # For LONG: SL is below entry, TP is above → price must drop to hit SL,
+    # rise to hit TP.
+    # For SHORT: SL is above entry, TP is below → price must rise to hit SL,
+    # drop to hit TP.
+    if side == "LONG":
+        sl_hit = existing.stop_loss > 0 and current_price <= existing.stop_loss
+        tp_hit = existing.take_profit > 0 and current_price >= existing.take_profit
+    else:
+        # SHORT (and any non-LONG side): invert the comparisons
+        sl_hit = existing.stop_loss > 0 and current_price >= existing.stop_loss
+        tp_hit = existing.take_profit > 0 and current_price <= existing.take_profit
+
+    if sl_hit:
+        # Stop loss hit — close at stop loss price (Guardian Mode priority)
+        closed_order = service.close_position(
+            symbol, existing.stop_loss, PaperOrderStatus.STOPPED
+        )
+    elif tp_hit:
+        # Take profit hit — close at take profit price
+        closed_order = service.close_position(
+            symbol, existing.take_profit, PaperOrderStatus.TAKEN_PROFIT
+        )
+
+    if closed_order is not None:
+        service.save_account(PAPER_STATE_PATH)
+
+    return closed_order
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start command."""
     paper_status = "Enabled" if settings.PAPER_TRADING else "Disabled"
@@ -131,10 +184,29 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"🎯 Take Profit: {trade.take_profit}\n"
         )
 
-        # Paper trading integration: place the approved trade as a paper order
+        # Paper trading integration
         if settings.PAPER_TRADING:
             try:
                 service = _get_paper_service()
+
+                # Check pre-existing positions for SL/TP breach BEFORE placing
+                # any new order. This ensures we never evaluate the order that
+                # is about to be opened in this same request.
+                sltp_closed = _before_analysis_paper_check(
+                    service, trade.symbol, trade.price
+                )
+                if sltp_closed is not None:
+                    message += (
+                        f"\n📄 Paper Order: CLOSED (SL/TP)\n"
+                        f"   Symbol: {sltp_closed.symbol}\n"
+                        f"   Side: {sltp_closed.side.value}\n"
+                        f"   Exit Price: ${sltp_closed.exit_price:.2f}\n"
+                        f"   Exit Status: {sltp_closed.exit_status.value}\n"
+                        f"   Realized PnL: ${sltp_closed.realized_pnl:.2f} "
+                        f"({_format_pnl_label(sltp_closed)})"
+                    )
+
+                # Now place the new trade (if still approved)
                 paper_order = service.place_trade(trade)
                 if paper_order is not None:
                     service.save_account(PAPER_STATE_PATH)
