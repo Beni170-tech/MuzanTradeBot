@@ -1,0 +1,115 @@
+"""Paper trading execution helpers.
+
+Sprint 5E: Convenience layer between the analysis pipeline and the
+paper broker. These helpers validate, place, and close paper trades
+without modifying any production trading logic.
+"""
+
+from __future__ import annotations
+
+from trader.paper.account import PaperAccount
+from trader.paper.broker import PaperBroker
+from trader.paper.order import PaperOrder, PaperOrderStatus
+from trader.paper.summary import PaperAccountSummary
+from trader.paper.rules import validate_paper_trade
+from trader.trade import Trade
+
+
+def place_paper_trade(broker: PaperBroker, trade: Trade) -> PaperOrder | None:
+    """Place an approved Trade as a paper order.
+
+    The trade must be approved by the risk system (``trade.approved is
+    True``) and must pass paper trading validation. If either condition
+    is not met, the function returns ``None`` without placing an order.
+
+    Args:
+        broker: The PaperBroker to place the order with.
+        trade: The Trade to place. Must have ``approved`` set to True.
+
+    Returns:
+        The placed PaperOrder on success, or None when the trade is not
+        approved or fails validation.
+    """
+    if trade is None:
+        return None
+
+    if not trade.approved:
+        return None
+
+    validation = validate_paper_trade(trade)
+    if not validation.ok:
+        return None
+
+    return broker.place_order(trade)
+
+
+def close_paper_position(
+    broker: PaperBroker,
+    symbol: str,
+    exit_price: float,
+    status: PaperOrderStatus,
+    exit_at: str | None = None,
+) -> PaperOrder | None:
+    """Close an open paper position for a symbol.
+
+    Looks up the open position for the given symbol and closes it with
+    the provided exit parameters. If no open position exists for the
+    symbol, returns None.
+
+    Args:
+        broker: The PaperBroker that holds the position.
+        symbol: The symbol to close (case-insensitive).
+        exit_price: The price at which the position is closed.
+        status: The terminal status for the closed order (e.g.
+            PaperOrderStatus.TAKEN_PROFIT, PaperOrderStatus.STOPPED,
+            PaperOrderStatus.CLOSED_MANUAL). Must be provided explicitly.
+        exit_at: Optional timestamp for the exit. When None, the current
+            time is used.
+
+    Returns:
+        The closed PaperOrder on success, or None when no open position
+        exists for the symbol.
+    """
+    open_positions = broker.get_open_positions_by_symbol(symbol)
+    if not open_positions:
+        return None
+
+    order = open_positions[0]
+    return broker.close_order(order, exit_price, status, exit_at)
+
+
+def get_open_position(broker: PaperBroker, symbol: str) -> PaperOrder | None:
+    """Return the open position for a symbol, or None if none exists.
+
+    Args:
+        broker: The PaperBroker to query.
+        symbol: The symbol to look up (case-insensitive).
+
+    Returns:
+        The open PaperOrder for the symbol, or None when no open position
+        exists.
+    """
+    positions = broker.get_open_positions_by_symbol(symbol)
+    if not positions:
+        return None
+    return positions[0]
+
+
+def get_paper_summary(broker: PaperBroker) -> PaperAccountSummary:
+    """Build a typed summary of the paper account state.
+
+    Args:
+        broker: The PaperBroker to summarize.
+
+    Returns:
+        A PaperAccountSummary with open positions, closed count, and
+        realized/unrealized PnL totals.
+    """
+    account = broker.account
+    return PaperAccountSummary(
+        open_positions=list(broker.get_open_positions()),
+        closed_count=account.closed_count,
+        total_realized_pnl=broker.get_total_realized_pnl(),
+        open_pnl=broker.get_open_pnl(),
+        equity=account.equity(),
+    )
