@@ -84,6 +84,15 @@ class Settings:
         "PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL", 0.0
     )
 
+    # Daily Loss Circuit Breaker (Sprint 8A)
+    # Maximum net realized loss allowed per local calendar day across
+    # the whole paper account. When the day's realized PnL reaches
+    # -limit, new paper trades are halted until the next day.
+    # When <= 0, no daily loss limit is enforced.
+    PORTFOLIO_DAILY_LOSS_LIMIT: float = _env_float(
+        "PORTFOLIO_DAILY_LOSS_LIMIT", 0.0
+    )
+
     @classmethod
     def is_configured(cls) -> bool:
         """Check if at least one exchange API key is set."""

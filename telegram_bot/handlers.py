@@ -34,6 +34,7 @@ from trader.paper.correlation_risk import (
     CorrelationRiskManager,
     trade_exposure,
 )
+from trader.paper.daily_risk import DailyRiskManager
 from trader.paper.portfolio_risk import (
     PortfolioRiskManager,
     total_portfolio_risk,
@@ -420,6 +421,33 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                             f"   Exposure Limit: ${settings.PORTFOLIO_EXPOSURE_LIMIT:,.2f}\n"
                             f"   The trade was not placed.\n"
                             f"   Close existing positions to free up exposure budget."
+                        )
+                        await update.message.reply_text(message)
+                        return
+
+                # Daily loss circuit breaker (Sprint 8A): run after the
+                # portfolio exposure check and before the symbol
+                # concentration check, so portfolio-wide rules are
+                # evaluated before the narrower per-symbol rule. When
+                # PORTFOLIO_DAILY_LOSS_LIMIT > 0, reject any new trade
+                # once the calendar day's net realized PnL reaches
+                # -limit (reaching the limit stops trading for the day).
+                if settings.PORTFOLIO_DAILY_LOSS_LIMIT > 0:
+                    daily_risk_manager = DailyRiskManager(
+                        service._broker,
+                        settings.PORTFOLIO_DAILY_LOSS_LIMIT,
+                    )
+                    if not daily_risk_manager.evaluate().allowed:
+                        daily_metrics = daily_risk_manager.metrics()
+                        message += (
+                            f"\n⛔ Daily Loss Limit Reached\n"
+                            f"   Day: {daily_metrics.day}\n"
+                            f"   Today's Realized PnL: "
+                            f"{_format_pnl_value(daily_metrics.realized_pnl_today)}\n"
+                            f"   Daily Loss Limit: "
+                            f"${daily_metrics.loss_limit:,.2f}\n"
+                            f"   The trade was not placed.\n"
+                            f"   New paper trades resume on the next day."
                         )
                         await update.message.reply_text(message)
                         return
@@ -817,6 +845,30 @@ async def stats_command(
                     f"${cm.exposure_limit:,.2f} "
                     f"({cm.exposure_usage_percent:.1f}%)\n"
                 )
+
+    # --- Section 3e: Daily Risk (Sprint 8A) ---
+    if settings.PORTFOLIO_DAILY_LOSS_LIMIT > 0:
+        daily_risk_manager = DailyRiskManager(
+            service._broker,
+            settings.PORTFOLIO_DAILY_LOSS_LIMIT,
+        )
+        daily_metrics = daily_risk_manager.metrics()
+        if daily_metrics.breached:
+            daily_status = "⛔ Brake active — new trades halted until tomorrow."
+        else:
+            daily_status = "✅ New trades allowed."
+        message += (
+            f"\n\n━━━━━━━━━━━━━━━━━━━\n"
+            f"🚦 Daily Risk\n"
+            f"━━━━━━━━━━━━━━━━━━━\n"
+            f"Day: {daily_metrics.day}\n"
+            f"Today's Realized PnL: "
+            f"{_format_pnl_value(daily_metrics.realized_pnl_today)}\n"
+            f"Daily Loss Limit: ${daily_metrics.loss_limit:,.2f}\n"
+            f"Loss Usage: {daily_metrics.loss_usage_percent:.1f}%\n"
+            f"Remaining Budget: ${daily_metrics.remaining_budget:,.2f}\n"
+            f"Status: {daily_status}\n"
+        )
 
     # --- Section 4: Per Symbol ---
     symbol_groups = group_by_symbol(closed_positions)
