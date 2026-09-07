@@ -27,6 +27,10 @@ from trader.paper.analytics import (
     group_by_symbol,
     get_recent_trades,
 )
+from trader.paper.portfolio_risk import (
+    PortfolioRiskManager,
+    total_portfolio_risk,
+)
 from trader.trade import build_trade
 from journal.journal import log_trade
 
@@ -365,6 +369,30 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         f"   Stop Loss: ${old_stop:.2f} → ${new_stop:.2f}"
                     )
 
+                # Portfolio risk check (Sprint 7A): run after SL/TP
+                # closure and trailing stop update, but before placing
+                # any new order. When PORTFOLIO_RISK_LIMIT > 0, reject
+                # trades that would exceed the configured limit.
+                if settings.PORTFOLIO_RISK_LIMIT > 0:
+                    manager = PortfolioRiskManager(
+                        service._broker, settings.PORTFOLIO_RISK_LIMIT
+                    )
+                    if not manager.can_open_trade(trade):
+                        current_risk = total_portfolio_risk(
+                            service._broker
+                        )
+                        message += (
+                            f"\n⚠️ Portfolio Risk Limit Exceeded\n"
+                            f"   Current Risk: ${current_risk:,.2f}\n"
+                            f"   Risk Limit: ${settings.PORTFOLIO_RISK_LIMIT:,.2f}\n"
+                            f"   Trade Risk: "
+                            f"${trade_risk_value(trade):,.2f}\n"
+                            f"   The trade was not placed.\n"
+                            f"   Close existing positions to free up risk budget."
+                        )
+                        await update.message.reply_text(message)
+                        return
+
                 # Now place the new trade (if still approved)
                 paper_order = service.place_trade(trade)
                 if paper_order is not None:
@@ -565,6 +593,20 @@ def _format_infnan(value: float | None) -> str:
     return f"{value:.2f}"
 
 
+def trade_risk_value(trade) -> float:
+    """Compute the dollar risk of a trade (for display in risk limit messages).
+
+    Mirrors the logic in trader.paper.portfolio_risk.trade_risk without
+    importing it here to avoid a circular dependency.
+    """
+    if trade.position_size <= 0 or not trade.stop_loss or trade.stop_loss <= 0:
+        return 0.0
+    if trade.side == "LONG":
+        return max(0.0, (trade.price - trade.stop_loss) * trade.position_size)
+    else:
+        return max(0.0, (trade.stop_loss - trade.price) * trade.position_size)
+
+
 async def stats_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -636,6 +678,20 @@ async def stats_command(
         f"Current Streak: {_format_streak(risk.current_streak)}\n"
         f"Max Consec. Losses: {risk.max_consecutive_losses}\n"
     )
+
+    # --- Section 3b: Portfolio Risk (Sprint 7A) ---
+    if settings.PORTFOLIO_RISK_LIMIT > 0:
+        manager = PortfolioRiskManager(service._broker, settings.PORTFOLIO_RISK_LIMIT)
+        prm = manager.metrics()
+        message += (
+            f"\n\n━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 Portfolio Risk\n"
+            f"━━━━━━━━━━━━━━━━━━━\n"
+            f"Current Risk: ${prm.current_risk:,.2f}\n"
+            f"Risk Limit: ${prm.risk_limit:,.2f}\n"
+            f"Risk Usage: {prm.usage_percent:.1f}%\n"
+            f"Remaining: ${prm.remaining:,.2f}\n"
+        )
 
     # --- Section 4: Per Symbol ---
     symbol_groups = group_by_symbol(closed_positions)

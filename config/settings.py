@@ -49,6 +49,11 @@ class Settings:
     STOP_LOSS_PERCENT: float = _env_float("STOP_LOSS_PERCENT", 2.0)
     TAKE_PROFIT_PERCENT: float = _env_float("TAKE_PROFIT_PERCENT", 4.0)
 
+    # Portfolio Risk Manager (Sprint 7A)
+    # Maximum total dollar risk across all open paper positions.
+    # When <= 0, no portfolio risk limit is enforced.
+    PORTFOLIO_RISK_LIMIT: float = _env_float("PORTFOLIO_RISK_LIMIT", 0.0)
+
     @classmethod
     def is_configured(cls) -> bool:
         """Check if at least one exchange API key is set."""
