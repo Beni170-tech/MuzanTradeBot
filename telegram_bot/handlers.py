@@ -18,6 +18,15 @@ from trader.paper.service import PaperTradingService
 from trader.paper.storage import load_account as storage_load_account
 from trader.paper.storage import save_account as storage_save_account
 from trader.paper.order import PaperOrder, PaperOrderStatus
+from trader.paper.analytics import (
+    OverallPerformance,
+    RiskMetrics,
+    SymbolPerformance,
+    compute_overall_performance,
+    compute_risk_metrics,
+    group_by_symbol,
+    get_recent_trades,
+)
 from trader.trade import build_trade
 from journal.journal import log_trade
 
@@ -48,6 +57,138 @@ def _format_pnl_label(order: PaperOrder) -> str:
     if order.realized_pnl < 0:
         return "LOSS"
     return "BREAKEVEN"
+
+
+def _apply_trailing_stop(
+    service: PaperTradingService, symbol: str, current_price: float
+) -> tuple[bool, float | None, float | None] | None:
+    """Apply trailing stop logic to an open paper position.
+
+    Runs during /analyze using the already-fetched market price.
+    No additional market API calls are made.
+
+    Behavior:
+        - For LONG: if price moves above entry by at least 1R
+          (entry - stop_loss distance), activate trailing and move
+          stop to break-even. After activation, trail the stop upward
+          as price rises, never moving it backward.
+        - For SHORT: mirror behavior — activate at 1R profit,
+          then trail downward.
+        - Never moves the stop backward.
+        - Never modifies take profit.
+        - Saves the paper account only when the stop actually changes.
+
+    Args:
+        service: The paper trading service.
+        symbol: The symbol to check.
+        current_price: The current market price from the ongoing
+            analysis. Must already be fetched; this function does not
+            fetch prices itself.
+
+    Returns:
+        None when there is no open position, no valid stop loss, or
+        no trailing action is warranted.
+        Otherwise a tuple of (changed, old_stop, new_stop) where
+        changed indicates whether the stop was modified and the old/new
+        stop values are provided for reporting.
+    """
+    position = service.get_position(symbol)
+    if position is None:
+        return None
+
+    # Defensive: skip if there is no valid stop loss to trail
+    if not position.stop_loss or position.stop_loss <= 0:
+        return None
+
+    side = (
+        position.side.value
+        if hasattr(position.side, "value")
+        else str(position.side).upper()
+    )
+    entry = position.entry_price
+    stop = position.stop_loss
+    stop_distance = abs(entry - stop)
+
+    # 1R threshold: entry plus/minus one stop-loss distance
+    if side == "LONG":
+        one_r_price = entry + stop_distance
+        # Not yet in 1R profit (strictly below threshold)
+        if current_price <= one_r_price:
+            return None
+
+        # First time crossing 1R → lock at break-even
+        if not _is_trail_active(position):
+            new_stop = entry
+            old_stop = stop
+            position.stop_loss = new_stop
+            _mark_trail_active(position)
+            # Always report activation — even if stop was already at
+            # breakeven, the trail_active flag is new.
+            if new_stop != old_stop:
+                service.save_account(PAPER_STATE_PATH)
+            return (True, old_stop, new_stop)
+
+        # Already trail-active — move stop up only if price allows,
+        # and only if it improves the stop (never backward).
+        new_stop = max(stop, current_price - stop_distance)
+        if new_stop > stop:
+            old_stop = stop
+            position.stop_loss = new_stop
+            service.save_account(PAPER_STATE_PATH)
+            return (True, old_stop, new_stop)
+        return None
+
+    else:
+        # SHORT (and any non-LONG side): mirror the logic.
+        one_r_price = entry - stop_distance
+        if current_price >= one_r_price:
+            return None
+
+        if not _is_trail_active(position):
+            new_stop = entry
+            old_stop = stop
+            position.stop_loss = new_stop
+            _mark_trail_active(position)
+            # Always report activation — even if stop was already at
+            # breakeven, the trail_active flag is new.
+            if new_stop != old_stop:
+                service.save_account(PAPER_STATE_PATH)
+            return (True, old_stop, new_stop)
+
+        new_stop = min(stop, current_price + stop_distance)
+        if new_stop < stop:
+            old_stop = stop
+            position.stop_loss = new_stop
+            service.save_account(PAPER_STATE_PATH)
+            return (True, old_stop, new_stop)
+        return None
+
+
+def _is_trail_active(position: object) -> bool:
+    """Return True when the position's trailing stop is already active.
+
+    Uses a notes-entry marker so trailing state survives serialization
+    through the JSON storage layer without requiring changes to the
+    PaperOrder dataclass.
+    """
+    notes = getattr(position, "notes", None) or []
+    return any(
+        isinstance(n, str) and n == "trailing_active" for n in notes
+    )
+
+
+def _mark_trail_active(position: object) -> None:
+    """Mark the position as having an active trailing stop.
+
+    Stores a marker string in the order's notes list so the state
+    survives JSON round-trips.
+    """
+    notes = getattr(position, "notes", None)
+    if notes is None:
+        notes = []
+        position.notes = notes
+    if "trailing_active" not in notes:
+        notes.append("trailing_active")
 
 
 def _before_analysis_paper_check(
@@ -130,7 +271,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/paper - Show paper account summary\n"
         "/positions - Show open paper positions\n"
         "/history - Show closed paper trades\n"
-        "/close <SYMBOL> <EXIT_PRICE> - Close a paper position"
+        "/close <SYMBOL> <EXIT_PRICE> - Close a paper position\n"
+        "/stats - Show paper trading performance dashboard"
     )
     await update.message.reply_text(message)
 
@@ -204,6 +346,23 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         f"   Exit Status: {sltp_closed.exit_status.value}\n"
                         f"   Realized PnL: ${sltp_closed.realized_pnl:.2f} "
                         f"({_format_pnl_label(sltp_closed)})"
+                    )
+
+                # Apply trailing stop to any pre-existing position
+                # before placing a new order. This runs after the
+                # SL/TP closure check so a just-closed position is not
+                # re-evaluated, and before place_trade so the new order
+                # being opened in this request is never subject to
+                # trailing in the same call.
+                trail_result = _apply_trailing_stop(
+                    service, trade.symbol, trade.price
+                )
+                if trail_result is not None:
+                    changed, old_stop, new_stop = trail_result
+                    message += (
+                        f"\n📄 Paper Order: TRAILING STOP UPDATED\n"
+                        f"   Symbol: {trade.symbol}\n"
+                        f"   Stop Loss: ${old_stop:.2f} → ${new_stop:.2f}"
                     )
 
                 # Now place the new trade (if still approved)
@@ -370,3 +529,146 @@ async def close_command(
         f"Realized PnL: ${order.realized_pnl:.2f} ({_format_pnl_label(order)})\n"
         f"Updated Balance: ${new_balance:.2f}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Paper Trading Performance Analytics (Sprint 6D)
+# ---------------------------------------------------------------------------
+
+
+def _format_pnl_value(value: float) -> str:
+    """Format a PnL value with sign and currency symbol."""
+    if value > 0:
+        return f"+${value:.2f}"
+    if value < 0:
+        return f"-${abs(value):.2f}"
+    return "$0.00"
+
+
+def _format_streak(streak: int) -> str:
+    """Format a win/loss streak for display."""
+    if streak > 0:
+        return f"+{streak} wins"
+    if streak < 0:
+        return f"{streak} losses"
+    return "None"
+
+
+def _format_infnan(value: float | None) -> str:
+    """Format a float that may be inf or None for display."""
+    if value is None:
+        return "N/A"
+    if value == float("inf"):
+        return "∞"
+    if value == float("-inf"):
+        return "-∞"
+    return f"{value:.2f}"
+
+
+async def stats_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Show paper trading performance dashboard."""
+    service = _get_paper_service()
+    summary = service.summary()
+    closed_positions = service.closed_positions()
+    open_positions = service.open_positions()
+
+    # --- Section 1: Account ---
+    total_return = (
+        ((summary.current_balance - summary.initial_balance)
+         / summary.initial_balance * 100.0)
+        if summary.initial_balance != 0.0
+        else 0.0
+    )
+    return_str = _format_pnl_value(total_return)
+    if total_return > 0:
+        return_str = f"+{total_return:.2f}%"
+    elif total_return < 0:
+        return_str = f"{total_return:.2f}%"
+
+    message = (
+        f"📊 Paper Trading Performance\n\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"📋 Account\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"Balance: ${summary.current_balance:,.2f}\n"
+        f"Initial: ${summary.initial_balance:,.2f}\n"
+        f"Return: {return_str}\n"
+        f"Open Positions: {len(open_positions)}\n"
+        f"Open PnL: {_format_pnl_value(summary.open_pnl)}\n"
+    )
+
+    if not closed_positions:
+        message += "\n📭 No closed trades yet."
+        await update.message.reply_text(message)
+        return
+
+    # --- Section 2: Overall Performance ---
+    overall = compute_overall_performance(closed_positions)
+    message += (
+        f"\n\n━━━━━━━━━━━━━━━━━━━\n"
+        f"📈 Overall Performance\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"Total Trades: {overall.total_trades}\n"
+        f"Win Rate: {overall.win_rate:.1f}%\n"
+        f"Wins: {overall.winning_trades}  "
+        f"Losses: {overall.losing_trades}  "
+        f"Breakevens: {overall.breakeven_trades}\n"
+        f"Total PnL: {_format_pnl_value(overall.total_realized_pnl)}\n"
+        f"Avg Win: ${overall.average_win:,.2f}\n"
+        f"Avg Loss: ${overall.average_loss:,.2f}\n"
+        f"Expectancy: {_format_pnl_value(overall.expectancy)}/trade\n"
+        f"Largest Win: ${overall.largest_win:,.2f}\n"
+        f"Largest Loss: ${overall.largest_loss:,.2f}\n"
+    )
+
+    # --- Section 3: Risk Metrics ---
+    risk = compute_risk_metrics(closed_positions)
+    message += (
+        f"\n\n━━━━━━━━━━━━━━━━━━━\n"
+        f"⚠️ Risk Metrics\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"Profit Factor: {_format_infnan(risk.profit_factor)}\n"
+        f"Win/Loss Ratio: {_format_infnan(risk.win_loss_ratio)}\n"
+        f"Payoff Ratio: {_format_infnan(risk.payoff_ratio)}\n"
+        f"Avg Trade PnL: {_format_pnl_value(risk.average_trade_pnl)}\n"
+        f"Current Streak: {_format_streak(risk.current_streak)}\n"
+        f"Max Consec. Losses: {risk.max_consecutive_losses}\n"
+    )
+
+    # --- Section 4: Per Symbol ---
+    symbol_groups = group_by_symbol(closed_positions)
+    message += "\n\n━━━━━━━━━━━━━━━━━━━\n📎 Per Symbol\n━━━━━━━━━━━━━━━━━━━\n"
+    for sp in symbol_groups:
+        pf_str = _format_infnan(sp.profit_factor)
+        message += (
+            f"{sp.symbol}: {sp.total_trades} trades, "
+            f"{sp.winning_trades}W {sp.losing_trades}L "
+            f"{sp.breakeven_trades}B, "
+            f"WR {sp.win_rate:.1f}%, "
+            f"PnL {_format_pnl_value(sp.total_pnl)}, "
+            f"PF {pf_str}\n"
+        )
+
+    # --- Section 5: Recent Trades ---
+    recent = get_recent_trades(closed_positions, limit=10)
+    message += "\n\n━━━━━━━━━━━━━━━━━━━\n📜 Recent Trades (last 10)\n━━━━━━━━━━━━━━━━━━━\n"
+    for pos in recent:
+        label = _format_pnl_label(pos)
+        entry_str = f"${pos.entry_price:,.2f}" if pos.entry_price else "N/A"
+        exit_str = f"${pos.exit_price:,.2f}" if pos.exit_price else "N/A"
+        date_str = (
+            pos.exit_at.strftime("%Y-%m-%d")
+            if pos.exit_at
+            else "N/A"
+        )
+        message += (
+            f"{pos.symbol:<6} {pos.side.value:<6} "
+            f"Entry {entry_str:<10} Exit {exit_str:<10} "
+            f"Qty {pos.quantity:<6} "
+            f"PnL {_format_pnl_value(pos.realized_pnl):<10} "
+            f"{label:<9} {date_str}\n"
+        )
+
+    await update.message.reply_text(message)

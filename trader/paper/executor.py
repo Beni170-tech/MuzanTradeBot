@@ -107,6 +107,8 @@ def get_paper_summary(broker: PaperBroker) -> PaperAccountSummary:
     """
     account = broker.account
     return PaperAccountSummary(
+        initial_balance=account.initial_balance,
+        current_balance=account.current_balance,
         open_positions=list(broker.get_open_positions()),
         closed_count=account.closed_count,
         total_realized_pnl=broker.get_total_realized_pnl(),

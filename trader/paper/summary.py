@@ -14,6 +14,8 @@ class PaperAccountSummary:
     """Snapshot of paper account state.
 
     Attributes:
+        initial_balance: The starting balance of the account.
+        current_balance: The current settled balance (after realized PnL).
         open_positions: List of currently open paper orders.
         closed_count: Number of closed positions.
         total_realized_pnl: Sum of realized PnL across all closed
@@ -23,6 +25,8 @@ class PaperAccountSummary:
         equity: Current account equity (balance + unrealized PnL).
     """
 
+    initial_balance: float
+    current_balance: float
     open_positions: list[PaperOrder]
     closed_count: int
     total_realized_pnl: float
