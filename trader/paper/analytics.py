@@ -313,3 +313,93 @@ def get_recent_trades(
     if not closed_positions:
         return []
     return closed_positions[:limit]
+
+
+# ---------------------------------------------------------------------------
+# Portfolio Exposure (Sprint 7B)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ExposureMetrics:
+    """Portfolio exposure metrics for display and enforcement."""
+
+    current_exposure: float
+    exposure_limit: float
+    usage_percent: float
+    remaining: float
+
+
+def position_exposure(order: "PaperOrder") -> float:
+    """Compute the notional exposure of a single open paper position.
+
+    Exposure is defined as ``entry_price * quantity`` regardless of side.
+    Returns 0.0 when the order has no valid entry price or quantity.
+
+    Args:
+        order: An open PaperOrder.
+
+    Returns:
+        Dollar notional exposure of the position.
+    """
+    if not order.entry_price or order.entry_price <= 0:
+        return 0.0
+    if not order.quantity or order.quantity <= 0:
+        return 0.0
+    return float(order.entry_price * order.quantity)
+
+
+def total_exposure(broker) -> float:
+    """Compute total notional exposure across all open paper positions.
+
+    Args:
+        broker: A PaperBroker-like object providing ``get_open_positions()``.
+
+    Returns:
+        Sum of ``position_exposure()`` for every open position.
+    """
+    positions = broker.get_open_positions()
+    if not positions:
+        return 0.0
+    return sum(position_exposure(pos) for pos in positions)
+
+
+def prospective_exposure(broker, trade: "Trade") -> float:
+    """Compute the total exposure if a new trade is added.
+
+    Args:
+        broker: A PaperBroker-like object providing ``get_open_positions()``.
+        trade: The candidate Trade being considered for placement.
+
+    Returns:
+        Current total exposure plus the exposure of the new trade.
+    """
+    new_exposure = trade.price * trade.position_size
+    return total_exposure(broker) + new_exposure
+
+
+def exposure_metrics(broker, limit: float) -> ExposureMetrics:
+    """Compute exposure metrics relative to a configured limit.
+
+    Args:
+        broker: A PaperBroker-like object providing ``get_open_positions()``.
+        limit: The configured PORTFOLIO_EXPOSURE_LIMIT. When <= 0, the
+            limit is considered disabled and usage/remaining are shown as 0.
+
+    Returns:
+        ExposureMetrics with current exposure, limit, usage percent, and
+        remaining available exposure.
+    """
+    current = total_exposure(broker)
+    if limit > 0:
+        usage_percent = (current / limit) * 100.0
+        remaining = max(0.0, limit - current)
+    else:
+        usage_percent = 0.0
+        remaining = 0.0
+    return ExposureMetrics(
+        current_exposure=current,
+        exposure_limit=limit,
+        usage_percent=usage_percent,
+        remaining=remaining,
+    )

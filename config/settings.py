@@ -54,6 +54,11 @@ class Settings:
     # When <= 0, no portfolio risk limit is enforced.
     PORTFOLIO_RISK_LIMIT: float = _env_float("PORTFOLIO_RISK_LIMIT", 0.0)
 
+    # Portfolio Exposure Limit (Sprint 7B)
+    # Maximum total notional exposure (entry_price * quantity) across all
+    # open paper positions. When <= 0, no exposure limit is enforced.
+    PORTFOLIO_EXPOSURE_LIMIT: float = _env_float("PORTFOLIO_EXPOSURE_LIMIT", 0.0)
+
     @classmethod
     def is_configured(cls) -> bool:
         """Check if at least one exchange API key is set."""

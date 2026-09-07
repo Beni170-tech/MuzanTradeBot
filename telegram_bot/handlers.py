@@ -22,10 +22,13 @@ from trader.paper.analytics import (
     OverallPerformance,
     RiskMetrics,
     SymbolPerformance,
+    ExposureMetrics,
     compute_overall_performance,
     compute_risk_metrics,
-    group_by_symbol,
+    compute_symbol_performance,
+    exposure_metrics,
     get_recent_trades,
+    group_by_symbol,
 )
 from trader.paper.portfolio_risk import (
     PortfolioRiskManager,
@@ -393,6 +396,30 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         await update.message.reply_text(message)
                         return
 
+                # Portfolio exposure check (Sprint 7B): run after the
+                # portfolio risk check and before placing any new order.
+                # When PORTFOLIO_EXPOSURE_LIMIT > 0, reject trades that
+                # would exceed the configured notional exposure limit.
+                if settings.PORTFOLIO_EXPOSURE_LIMIT > 0:
+                    prospective = trade.price * trade.position_size
+                    current_exposure = exposure_metrics(
+                        service._broker, 0.0
+                    ).current_exposure
+                    if current_exposure + prospective > settings.PORTFOLIO_EXPOSURE_LIMIT:
+                        metrics = exposure_metrics(
+                            service._broker, settings.PORTFOLIO_EXPOSURE_LIMIT
+                        )
+                        message += (
+                            f"\n⚠️ Portfolio Exposure Limit Exceeded\n"
+                            f"   Current Exposure: ${current_exposure:,.2f}\n"
+                            f"   Requested Exposure: ${prospective:,.2f}\n"
+                            f"   Exposure Limit: ${settings.PORTFOLIO_EXPOSURE_LIMIT:,.2f}\n"
+                            f"   The trade was not placed.\n"
+                            f"   Close existing positions to free up exposure budget."
+                        )
+                        await update.message.reply_text(message)
+                        return
+
                 # Now place the new trade (if still approved)
                 paper_order = service.place_trade(trade)
                 if paper_order is not None:
@@ -691,6 +718,19 @@ async def stats_command(
             f"Risk Limit: ${prm.risk_limit:,.2f}\n"
             f"Risk Usage: {prm.usage_percent:.1f}%\n"
             f"Remaining: ${prm.remaining:,.2f}\n"
+        )
+
+    # --- Section 3c: Portfolio Exposure (Sprint 7B) ---
+    if settings.PORTFOLIO_EXPOSURE_LIMIT > 0:
+        em = exposure_metrics(service._broker, settings.PORTFOLIO_EXPOSURE_LIMIT)
+        message += (
+            f"\n\n━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 Portfolio Exposure\n"
+            f"━━━━━━━━━━━━━━━━━━━\n"
+            f"Current Exposure: ${em.current_exposure:,.2f}\n"
+            f"Exposure Limit: ${em.exposure_limit:,.2f}\n"
+            f"Exposure Usage: {em.usage_percent:.1f}%\n"
+            f"Remaining: ${em.remaining:,.2f}\n"
         )
 
     # --- Section 4: Per Symbol ---
