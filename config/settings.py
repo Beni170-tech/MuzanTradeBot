@@ -21,6 +21,17 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_int(name: str, default: int) -> int:
+    """Read an int from the environment, falling back to ``default`` when
+    the variable is missing or not a valid number. Invalid configuration
+    must never crash the bot or, worse, trade with corrupted numbers."""
+    raw = os.getenv(name, "")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return default
+
+
 class Settings:
     """Central settings loaded from environment variables."""
 
@@ -58,6 +69,20 @@ class Settings:
     # Maximum total notional exposure (entry_price * quantity) across all
     # open paper positions. When <= 0, no exposure limit is enforced.
     PORTFOLIO_EXPOSURE_LIMIT: float = _env_float("PORTFOLIO_EXPOSURE_LIMIT", 0.0)
+
+    # Correlation Risk Manager (Sprint 7C)
+    # Maximum number of open paper positions allowed on a single symbol.
+    # When <= 0, the per-symbol position-count rule is disabled.
+    PORTFOLIO_MAX_POSITIONS_PER_SYMBOL: int = _env_int(
+        "PORTFOLIO_MAX_POSITIONS_PER_SYMBOL", 0
+    )
+
+    # Maximum total notional exposure (entry_price * quantity) allowed on a
+    # single symbol across all open paper positions. When <= 0, the
+    # per-symbol exposure rule is disabled.
+    PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL: float = _env_float(
+        "PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL", 0.0
+    )
 
     @classmethod
     def is_configured(cls) -> bool:

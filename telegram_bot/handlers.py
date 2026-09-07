@@ -30,6 +30,10 @@ from trader.paper.analytics import (
     get_recent_trades,
     group_by_symbol,
 )
+from trader.paper.correlation_risk import (
+    CorrelationRiskManager,
+    trade_exposure,
+)
 from trader.paper.portfolio_risk import (
     PortfolioRiskManager,
     total_portfolio_risk,
@@ -420,6 +424,55 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         await update.message.reply_text(message)
                         return
 
+                # Correlation / concentration check (Sprint 7C): run after
+                # the portfolio exposure check and before placing any new
+                # order. When either per-symbol limit is configured, reject
+                # trades that would exceed the position-count cap or the
+                # per-symbol notional exposure cap. Symbol concentration is
+                # the narrowest portfolio constraint, so it is evaluated
+                # last and reports the most specific failing rule.
+                if (
+                    settings.PORTFOLIO_MAX_POSITIONS_PER_SYMBOL > 0
+                    or settings.PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL > 0
+                ):
+                    concentration_manager = CorrelationRiskManager(
+                        service._broker,
+                        settings.PORTFOLIO_MAX_POSITIONS_PER_SYMBOL,
+                        settings.PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL,
+                    )
+                    conc_check = concentration_manager.evaluate(trade)
+                    if not conc_check.allowed:
+                        conc_metrics = concentration_manager.metrics(
+                            trade.symbol
+                        )
+                        message += (
+                            f"\n⚠️ Symbol Concentration Limit Exceeded\n"
+                            f"   Symbol: {trade.symbol}\n"
+                        )
+                        if conc_check.rule == "positions":
+                            message += (
+                                f"   Open Positions: "
+                                f"{conc_metrics.open_positions}\n"
+                                f"   Max Positions: "
+                                f"{conc_metrics.max_positions}\n"
+                            )
+                        else:
+                            message += (
+                                f"   Current Exposure: "
+                                f"${conc_metrics.symbol_exposure:,.2f}\n"
+                                f"   Requested Exposure: "
+                                f"${trade_exposure(trade):,.2f}\n"
+                                f"   Exposure Limit: "
+                                f"${conc_metrics.exposure_limit:,.2f}\n"
+                            )
+                        message += (
+                            f"   The trade was not placed.\n"
+                            f"   Close existing positions to free up "
+                            f"concentration budget."
+                        )
+                        await update.message.reply_text(message)
+                        return
+
                 # Now place the new trade (if still approved)
                 paper_order = service.place_trade(trade)
                 if paper_order is not None:
@@ -732,6 +785,38 @@ async def stats_command(
             f"Exposure Usage: {em.usage_percent:.1f}%\n"
             f"Remaining: ${em.remaining:,.2f}\n"
         )
+
+    # --- Section 3d: Symbol Concentration (Sprint 7C) ---
+    if (
+        settings.PORTFOLIO_MAX_POSITIONS_PER_SYMBOL > 0
+        or settings.PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL > 0
+    ):
+        concentration_manager = CorrelationRiskManager(
+            service._broker,
+            settings.PORTFOLIO_MAX_POSITIONS_PER_SYMBOL,
+            settings.PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL,
+        )
+        concentration_report = concentration_manager.concentration_report()
+        message += (
+            f"\n\n━━━━━━━━━━━━━━━━━━━\n"
+            f"🧲 Symbol Concentration\n"
+            f"━━━━━━━━━━━━━━━━━━━\n"
+        )
+        if not concentration_report:
+            message += "No open positions.\n"
+        for cm in concentration_report:
+            message += f"{cm.symbol}:\n"
+            if cm.max_positions > 0:
+                message += (
+                    f"   Positions: {cm.open_positions} / "
+                    f"{cm.max_positions}\n"
+                )
+            if cm.exposure_limit > 0:
+                message += (
+                    f"   Exposure: ${cm.symbol_exposure:,.2f} / "
+                    f"${cm.exposure_limit:,.2f} "
+                    f"({cm.exposure_usage_percent:.1f}%)\n"
+                )
 
     # --- Section 4: Per Symbol ---
     symbol_groups = group_by_symbol(closed_positions)
