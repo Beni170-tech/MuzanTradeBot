@@ -3,8 +3,11 @@ MuzanTradeBot - Telegram Command Handlers
 All user-facing command logic lives here.
 """
 
+import logging
 from datetime import datetime
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -35,6 +38,7 @@ from trader.paper.correlation_risk import (
     trade_exposure,
 )
 from trader.paper.daily_risk import DailyRiskManager
+from trader.paper.max_open_positions import MaxOpenPositionsManager
 from trader.paper.portfolio_risk import (
     PortfolioRiskManager,
     total_portfolio_risk,
@@ -452,6 +456,33 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         await update.message.reply_text(message)
                         return
 
+                # Maximum open portfolio positions (Sprint 8B): run after
+                # the daily loss circuit breaker and before the symbol
+                # concentration check, so portfolio-wide guards are
+                # evaluated before the narrower per-symbol rule. When
+                # PORTFOLIO_MAX_OPEN_POSITIONS > 0, reject new paper
+                # trades once the current open position count reaches the
+                # configured limit.
+                if settings.PORTFOLIO_MAX_OPEN_POSITIONS > 0:
+                    mgr = MaxOpenPositionsManager(
+                        service._broker,
+                        settings.PORTFOLIO_MAX_OPEN_POSITIONS,
+                    )
+                    mop_result = mgr.evaluate()
+                    if not mop_result.allowed:
+                        message += (
+                            f"\n⛔ Maximum Open Positions Reached\n"
+                            f"   Current Open Positions: "
+                            f"{mop_result.current_open_positions}\n"
+                            f"   Max Open Positions: "
+                            f"{mop_result.limit}\n"
+                            f"   The trade was not placed.\n"
+                            f"   Close existing positions to free up "
+                            f"open-position capacity."
+                        )
+                        await update.message.reply_text(message)
+                        return
+
                 # Correlation / concentration check (Sprint 7C): run after
                 # the portfolio exposure check and before placing any new
                 # order. When either per-symbol limit is configured, reject
@@ -515,9 +546,18 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         f"   Take Profit: ${paper_order.take_profit:.2f}\n"
                         f"   Side: {paper_order.side.value}"
                     )
-            except Exception:
-                # Paper trading failure should not break the main analysis flow
-                pass
+            except Exception as exc:
+                # Paper trading failure should not break the main analysis
+                # flow, but it must never fail silently: log it so a bug in
+                # the paper-trading branch (e.g. an unexpected mock or a
+                # manager error) is visible instead of looking like the
+                # paper-trading path was never reached.
+                logger.warning(
+                    "Paper trading integration failed during /analyze "
+                    "for %s: %s",
+                    trade.symbol,
+                    exc,
+                )
 
     else:
         message += f"🛑 Risk: {trade.risk_verdict}\n"
@@ -868,6 +908,24 @@ async def stats_command(
             f"Loss Usage: {daily_metrics.loss_usage_percent:.1f}%\n"
             f"Remaining Budget: ${daily_metrics.remaining_budget:,.2f}\n"
             f"Status: {daily_status}\n"
+        )
+
+    # --- Section 3f: Maximum Open Positions (Sprint 8B) ---
+    if settings.PORTFOLIO_MAX_OPEN_POSITIONS > 0:
+        mgr = MaxOpenPositionsManager(
+            service._broker,
+            settings.PORTFOLIO_MAX_OPEN_POSITIONS,
+        )
+        mop_metrics = mgr.metrics()
+        message += (
+            f"\n\n━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 Max Open Positions\n"
+            f"━━━━━━━━━━━━━━━━━━━\n"
+            f"Current Open Positions: {mop_metrics.current_open_positions}\n"
+            f"Limit: {mop_metrics.limit}\n"
+            f"Capacity Used: {mop_metrics.usage_percent:.1f}%\n"
+            f"Remaining: {mop_metrics.remaining}\n"
+            f"Status: {mop_metrics.status}\n"
         )
 
     # --- Section 4: Per Symbol ---

@@ -93,6 +93,16 @@ class Settings:
         "PORTFOLIO_DAILY_LOSS_LIMIT", 0.0
     )
 
+    # Maximum Open Portfolio Positions (Sprint 8B)
+    # Maximum number of open paper positions allowed across the whole
+    # paper account. When the current open position count reaches this
+    # limit, new paper trades are rejected until existing positions are
+    # closed. Applies to all symbols combined. When <= 0, the limit is
+    # disabled.
+    PORTFOLIO_MAX_OPEN_POSITIONS: int = _env_int(
+        "PORTFOLIO_MAX_OPEN_POSITIONS", 0
+    )
+
     @classmethod
     def is_configured(cls) -> bool:
         """Check if at least one exchange API key is set."""
