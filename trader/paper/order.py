@@ -154,3 +154,65 @@ class PaperOrder:
     def is_terminal(self) -> bool:
         """Return True when the order is in a terminal (non-open) state."""
         return not self.is_open()
+
+
+def paper_exit_status(order: object, default: str = "") -> str:
+    """Return the exit-status label for a closed paper order.
+
+    The canonical attribute on PaperOrder is ``status``: ``record_exit``
+    sets ``status`` to the terminal PaperOrderStatus when a position
+    closes. Some historical call sites and test mocks used an
+    ``exit_status`` attribute that never existed on real orders, which
+    made those code paths crash (or silently abort) on production data.
+
+    This function is the single compatibility point for both shapes:
+    it prefers ``exit_status`` when present (legacy/mock shape), falls
+    back to ``status`` (real PaperOrder shape), and returns ``default``
+    when neither carries a usable value. A non-string ``exit_status``
+    value is treated as absent (this also makes the helper robust
+    against auto-created mock attributes).
+
+    Args:
+        order: A PaperOrder or compatible object.
+        default: Value returned when no usable status is found.
+
+    Returns:
+        The terminal status label, e.g. ``"STOPPED"`` or
+        ``"TAKEN_PROFIT"``.
+    """
+    for attr in ("exit_status", "status"):
+        status = getattr(order, attr, None)
+        value = getattr(status, "value", status)
+        if isinstance(value, str) and value:
+            return value
+    return default
+
+
+def paper_exit_date(order: object, format: str = "%Y-%m-%d %H:%M", default: str = "N/A") -> str:
+    """Return the formatted exit date for a closed paper order.
+
+    PaperOrder.exit_at is always a naive timestamp *string*
+    (``"YYYY-MM-DD HH:MM:SS"``, the format written by the paper order
+    and journal layers), yet some display code called
+    ``exit_at.strftime`` directly, which only works on datetime
+    objects and crashes on production data. This helper accepts both
+    shapes: datetime-like objects (via ``strftime``) and plain strings
+    (truncated to 16 characters, i.e. ``YYYY-MM-DD HH:MM``).
+
+    Args:
+        order: A PaperOrder or compatible object.
+        format: strftime format used when ``exit_at`` is datetime-like.
+        default: Value returned when ``exit_at`` is missing or empty.
+
+    Returns:
+        The formatted exit timestamp, or ``default`` when unavailable.
+    """
+    exit_at = getattr(order, "exit_at", None)
+    if not exit_at:
+        return default
+    strftime = getattr(exit_at, "strftime", None)
+    if callable(strftime):
+        return strftime(format)
+    if isinstance(exit_at, str):
+        return exit_at[:16]
+    return default

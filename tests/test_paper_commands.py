@@ -55,8 +55,13 @@ def _make_order(symbol="BTC", side="LONG", entry_price=100.0, quantity=1.0,
     order.quantity = quantity
     order.realized_pnl = realized_pnl
     order.exit_price = exit_price
+    # Mirror the real PaperOrder shape: the terminal status lives in
+    # ``status``. ``exit_status`` is kept as the legacy/mock shape that
+    # paper_exit_status prefers, so both paths are exercised.
     order.exit_status = MagicMock()
     order.exit_status.value = exit_status
+    order.status = MagicMock()
+    order.status.value = exit_status
     order.exit_at = exit_at
     order.unrealized_pnl_for.return_value = unrealized_pnl
     return order

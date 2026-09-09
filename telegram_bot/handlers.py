@@ -21,6 +21,7 @@ from trader.paper.service import PaperTradingService
 from trader.paper.storage import load_account as storage_load_account
 from trader.paper.storage import save_account as storage_save_account
 from trader.paper.order import PaperOrder, PaperOrderStatus
+from trader.paper.order import paper_exit_status, paper_exit_date
 from trader.paper.analytics import (
     OverallPerformance,
     RiskMetrics,
@@ -45,12 +46,73 @@ from trader.paper.portfolio_risk import (
 )
 from trader.trade import build_trade
 from journal.journal import log_trade
+from alerts.manager import AlertManager, build_alert_manager
 
 # Path for persisting paper account state
 PAPER_STATE_PATH = Path("logs/paper_state.json")
 
 # Module-level paper service (lazy-loaded)
 _paper_service: PaperTradingService | None = None
+
+# Module-level alert manager (lazy-loaded, Sprint 9A)
+_alert_manager: AlertManager | None = None
+
+
+def _get_alert_manager() -> AlertManager:
+    """Get or create the alert manager (lazy initialization).
+
+    The manager is built from settings and never raises: when alerts
+    are disabled or unconfigured it is backed by a NullNotifier and
+    every call is a no-op.
+    """
+    global _alert_manager
+    if _alert_manager is None:
+        _alert_manager = build_alert_manager(
+            alerts_enabled=settings.ALERTS_ENABLED,
+            chat_id=settings.TELEGRAM_ALERT_CHAT_ID,
+            token=settings.TELEGRAM_BOT_TOKEN,
+        )
+    return _alert_manager
+
+
+def _alerts_active() -> bool:
+    """Return True when alerts are enabled in settings right now.
+
+    This is the live dispatch gate: the caller (this handler layer)
+    is responsible for checking ALERTS_ENABLED at call time, exactly
+    like the other settings gates in the analyze flow. The
+    AlertManager's constructor-time ``enabled`` snapshot is only a
+    second layer of defense and cannot be consulted when the manager
+    is replaced (e.g. by tests) — the live settings check here is
+    what guarantees no alert method is awaited when alerts are
+    disabled.
+    """
+    return bool(settings.ALERTS_ENABLED)
+
+
+async def _dispatch_alert(event: str, *args) -> None:
+    """Dispatch one alert event when alerts are enabled (never raises).
+
+    Args:
+        event: The AlertManager method name to invoke (e.g.
+            "order_placed", "trade_rejected").
+        *args: Arguments forwarded to the alert method.
+    """
+    if not _alerts_active():
+        return
+    manager = _get_alert_manager()
+    method = getattr(manager, event, None)
+    if method is None:
+        logger.warning("Unknown alert event %r; alert dropped.", event)
+        return
+    try:
+        await method(*args)
+    except Exception:
+        logger.warning(
+            "Alert dispatch failed for %s; alert dropped.",
+            event,
+            exc_info=True,
+        )
 
 
 def _get_paper_service() -> PaperTradingService:
@@ -359,10 +421,20 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         f"   Symbol: {sltp_closed.symbol}\n"
                         f"   Side: {sltp_closed.side.value}\n"
                         f"   Exit Price: ${sltp_closed.exit_price:.2f}\n"
-                        f"   Exit Status: {sltp_closed.exit_status.value}\n"
+                        f"   Exit Status: {paper_exit_status(sltp_closed)}\n"
                         f"   Realized PnL: ${sltp_closed.realized_pnl:.2f} "
                         f"({_format_pnl_label(sltp_closed)})"
                     )
+                    # Sprint 9A: push an SL/TP alert (never raises).
+                    exit_value = paper_exit_status(sltp_closed)
+                    if exit_value == PaperOrderStatus.STOPPED.value:
+                        await _dispatch_alert(
+                            "stop_loss_triggered", sltp_closed
+                        )
+                    elif exit_value == PaperOrderStatus.TAKEN_PROFIT.value:
+                        await _dispatch_alert(
+                            "take_profit_triggered", sltp_closed
+                        )
 
                 # Apply trailing stop to any pre-existing position
                 # before placing a new order. This runs after the
@@ -379,6 +451,10 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         f"\n📄 Paper Order: TRAILING STOP UPDATED\n"
                         f"   Symbol: {trade.symbol}\n"
                         f"   Stop Loss: ${old_stop:.2f} → ${new_stop:.2f}"
+                    )
+                    # Sprint 9A: push a trailing-stop alert (never raises).
+                    await _dispatch_alert(
+                        "trailing_stop_updated", trade.symbol, old_stop, new_stop
                     )
 
                 # Portfolio risk check (Sprint 7A): run after SL/TP
@@ -401,6 +477,12 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                             f"${trade_risk_value(trade):,.2f}\n"
                             f"   The trade was not placed.\n"
                             f"   Close existing positions to free up risk budget."
+                        )
+                        # Sprint 9A: push a guardian/risk-limit rejection alert.
+                        await _dispatch_alert(
+                            "trade_rejected",
+                            trade,
+                            "portfolio risk limit exceeded",
                         )
                         await update.message.reply_text(message)
                         return
@@ -425,6 +507,12 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                             f"   Exposure Limit: ${settings.PORTFOLIO_EXPOSURE_LIMIT:,.2f}\n"
                             f"   The trade was not placed.\n"
                             f"   Close existing positions to free up exposure budget."
+                        )
+                        # Sprint 9A: push a guardian/risk-limit rejection alert.
+                        await _dispatch_alert(
+                            "trade_rejected",
+                            trade,
+                            "portfolio exposure limit exceeded",
                         )
                         await update.message.reply_text(message)
                         return
@@ -453,6 +541,17 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                             f"   The trade was not placed.\n"
                             f"   New paper trades resume on the next day."
                         )
+                        # Sprint 9A: push the daily-loss breaker activation
+                        # alert plus the guardian rejection alert (both
+                        # never raise).
+                        await _dispatch_alert(
+                            "daily_loss_breaker", daily_metrics
+                        )
+                        await _dispatch_alert(
+                            "trade_rejected",
+                            trade,
+                            "daily loss breaker active for today",
+                        )
                         await update.message.reply_text(message)
                         return
 
@@ -479,6 +578,16 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                             f"   The trade was not placed.\n"
                             f"   Close existing positions to free up "
                             f"open-position capacity."
+                        )
+                        # Sprint 9A: push the max-open-positions alert plus
+                        # the guardian rejection alert (both never raise).
+                        await _dispatch_alert(
+                            "max_open_positions_reached", mop_result
+                        )
+                        await _dispatch_alert(
+                            "trade_rejected",
+                            trade,
+                            "maximum open positions limit reached",
                         )
                         await update.message.reply_text(message)
                         return
@@ -529,6 +638,12 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                             f"   Close existing positions to free up "
                             f"concentration budget."
                         )
+                        # Sprint 9A: push a guardian/risk-limit rejection alert.
+                        await _dispatch_alert(
+                            "trade_rejected",
+                            trade,
+                            "symbol concentration limit exceeded",
+                        )
                         await update.message.reply_text(message)
                         return
 
@@ -546,6 +661,8 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         f"   Take Profit: ${paper_order.take_profit:.2f}\n"
                         f"   Side: {paper_order.side.value}"
                     )
+                    # Sprint 9A: push an order-placed alert (never raises).
+                    await _dispatch_alert("order_placed", paper_order)
             except Exception as exc:
                 # Paper trading failure should not break the main analysis
                 # flow, but it must never fail silently: log it so a bug in
@@ -655,8 +772,8 @@ async def history_command(
             f"  Exit: ${pos.exit_price:.2f}\n"
             f"  Qty: {pos.quantity}\n"
             f"  Realized PnL: ${pos.realized_pnl:.2f} ({label})\n"
-            f"  Closed: {pos.exit_status.value}\n"
-            f"  Date: {pos.exit_at.strftime('%Y-%m-%d %H:%M') if pos.exit_at else 'N/A'}\n\n"
+            f"  Closed: {paper_exit_status(pos)}\n"
+            f"  Date: {paper_exit_date(pos)}\n\n"
         )
 
     await update.message.reply_text(message)
@@ -949,11 +1066,7 @@ async def stats_command(
         label = _format_pnl_label(pos)
         entry_str = f"${pos.entry_price:,.2f}" if pos.entry_price else "N/A"
         exit_str = f"${pos.exit_price:,.2f}" if pos.exit_price else "N/A"
-        date_str = (
-            pos.exit_at.strftime("%Y-%m-%d")
-            if pos.exit_at
-            else "N/A"
-        )
+        date_str = paper_exit_date(pos, format="%Y-%m-%d")
         message += (
             f"{pos.symbol:<6} {pos.side.value:<6} "
             f"Entry {entry_str:<10} Exit {exit_str:<10} "

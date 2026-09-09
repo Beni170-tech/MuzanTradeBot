@@ -32,8 +32,12 @@ def _make_order(
     order = MagicMock()
     order.symbol = symbol
     order.realized_pnl = realized_pnl
+    # Mirror the real PaperOrder shape: terminal status lives in
+    # ``status``; ``exit_status`` remains the legacy shape.
     order.exit_status = MagicMock()
     order.exit_status.value = exit_status
+    order.status = MagicMock()
+    order.status.value = exit_status
     order.exit_at = exit_at
     return order
 

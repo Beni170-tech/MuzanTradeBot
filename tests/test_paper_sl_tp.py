@@ -38,6 +38,8 @@ def _make_order(
     order.order_id = order_id
     order.realized_pnl = 0.0
     order.exit_price = 0.0
+    # Legacy/mock shape kept alongside the real ``status`` attribute
+    # (paper_exit_status prefers exit_status, falls back to status).
     order.exit_status = MagicMock()
     order.exit_status.value = "OPEN"
     order.exit_at = None

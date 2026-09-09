@@ -7,13 +7,14 @@ Execution, persistence, feed, and Telegram integration
 are intentionally out of scope for Sprint 5A.
 """
 
-from trader.paper.order import PaperOrderStatus, PaperOrder
+from trader.paper.order import PaperOrderStatus, PaperOrder, paper_exit_status
 from trader.paper.account import PaperAccount
 
 # Sprint 8B: expose max open positions limit helpers at package level.
 __all__ = [
     "PaperOrderStatus",
     "PaperOrder",
+    "paper_exit_status",
     "PaperAccount",
     "MaxOpenPositionsResult",
     "MaxOpenPositionsMetrics",

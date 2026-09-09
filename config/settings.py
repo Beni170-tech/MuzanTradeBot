@@ -84,6 +84,19 @@ class Settings:
         "PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL", 0.0
     )
 
+    # Telegram Alerts (Sprint 9A)
+    # Master switch for push notifications (paper order placed, SL/TP
+    # triggered, trailing stop updates, guardian/risk-limit rejections,
+    # daily loss breaker activation, max open positions reached).
+    # When False, no alerts are sent anywhere.
+    ALERTS_ENABLED: bool = os.getenv("ALERTS_ENABLED", "false").lower() in (
+        "true", "1", "yes"
+    )
+
+    # Telegram chat id alerts are sent to. When empty, alerts are
+    # disabled for this run even if ALERTS_ENABLED is true.
+    TELEGRAM_ALERT_CHAT_ID: str = os.getenv("TELEGRAM_ALERT_CHAT_ID", "")
+
     # Daily Loss Circuit Breaker (Sprint 8A)
     # Maximum net realized loss allowed per local calendar day across
     # the whole paper account. When the day's realized PnL reaches
