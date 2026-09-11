@@ -116,6 +116,15 @@ class Settings:
         "PORTFOLIO_MAX_OPEN_POSITIONS", 0
     )
 
+    # Background Position Monitor (Sprint 9B)
+    # Interval in seconds between background monitoring cycles for open
+    # paper positions. When <= 0, the background monitor is disabled.
+    # The default is 45 seconds, which balances responsiveness with
+    # respect for CoinGecko rate limits and Telegram polling.
+    PAPER_MONITOR_INTERVAL_SECONDS: float = _env_float(
+        "PAPER_MONITOR_INTERVAL_SECONDS", 45.0
+    )
+
     @classmethod
     def is_configured(cls) -> bool:
         """Check if at least one exchange API key is set."""

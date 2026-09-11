@@ -19,7 +19,12 @@ from telegram_bot.handlers import (
     close_command,
     stats_command,
 )
+from trader.paper.monitor import PaperPositionMonitor
+
 logger = logging.getLogger(__name__)
+
+# Module-level monitor so it can be referenced by run_bot() for shutdown.
+_paper_monitor: PaperPositionMonitor | None = None
 
 
 def build_application() -> Application:
@@ -42,13 +47,54 @@ def build_application() -> Application:
     return app
 
 
+def _build_paper_monitor() -> PaperPositionMonitor | None:
+    """Build the background paper position monitor when configured.
+
+    Returns None when paper trading is disabled or when the monitor
+    interval is not positive.
+    """
+    if not settings.PAPER_TRADING:
+        logger.info("Paper trading disabled; background monitor not started.")
+        return None
+
+    interval = settings.PAPER_MONITOR_INTERVAL_SECONDS
+    if interval <= 0:
+        logger.info(
+            "PAPER_MONITOR_INTERVAL_SECONDS <= 0; background monitor disabled."
+        )
+        return None
+
+    from telegram_bot.handlers import _get_paper_service, _get_alert_manager
+
+    service = _get_paper_service()
+    alerts = _get_alert_manager()
+    monitor = PaperPositionMonitor(service, alerts, interval_seconds=interval)
+    return monitor
+
+
 def run_bot() -> None:
     """Start the Telegram bot with polling."""
+    global _paper_monitor
+
     app = build_application()
+
+    # Start the background position monitor when configured.
+    # The monitor runs in a daemon thread so it never blocks Telegram
+    # polling and stops automatically when the process exits.
+    _paper_monitor = _build_paper_monitor()
+    if _paper_monitor is not None:
+        _paper_monitor.start()
+        logger.info("Background paper position monitor started.")
 
     print("Bot application created.")
     print("Starting polling...")
 
-    app.run_polling(drop_pending_updates=True)
+    try:
+        app.run_polling(drop_pending_updates=True)
+    finally:
+        # Clean shutdown: stop the monitor before the app fully exits.
+        if _paper_monitor is not None:
+            _paper_monitor.stop()
+            logger.info("Background paper position monitor stopped during shutdown.")
 
     print("Polling stopped.")
