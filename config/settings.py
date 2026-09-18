@@ -125,6 +125,22 @@ class Settings:
         "PAPER_MONITOR_INTERVAL_SECONDS", 45.0
     )
 
+    # Telegram Command Rate Limiting (Sprint 10A)
+    # Maximum number of Telegram commands allowed per chat in each
+    # configured window. When <= 0, command rate limiting is disabled
+    # entirely. This is a spam/abuse guard, not a trade execution
+    # gate, so it never touches Guardian Mode or the trading flow.
+    TELEGRAM_COMMAND_RATE_LIMIT_PER_WINDOW: int = _env_int(
+        "TELEGRAM_COMMAND_RATE_LIMIT_PER_WINDOW", 12
+    )
+
+    # Telegram Command Rate Limiting (Sprint 10A)
+    # Sliding window length in seconds for the per-chat command rate
+    # limit. When <= 0, command rate limiting is disabled entirely.
+    TELEGRAM_COMMAND_RATE_WINDOW_SECONDS: float = _env_float(
+        "TELEGRAM_COMMAND_RATE_WINDOW_SECONDS", 10.0
+    )
+
     @classmethod
     def is_configured(cls) -> bool:
         """Check if at least one exchange API key is set."""

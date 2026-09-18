@@ -47,9 +47,23 @@ from trader.paper.portfolio_risk import (
 from trader.trade import build_trade
 from journal.journal import log_trade
 from alerts.manager import AlertManager, build_alert_manager
+from telegram_bot.rate_limit import (
+    build_rate_limit_config,
+    check_rate_limit,
+    reset_rate_limit_state,
+)
 
 # Path for persisting paper account state
 PAPER_STATE_PATH = Path("logs/paper_state.json")
+
+# Module-level rate-limit configuration. This is built once at import time
+# from settings, but the helper uses the live settings values so tests can
+# monkeypatch settings before the handlers module is loaded or by patching
+# telegram_bot.handlers.settings.
+_rate_limit_config = build_rate_limit_config(
+    commands_per_window=settings.TELEGRAM_COMMAND_RATE_LIMIT_PER_WINDOW,
+    window_seconds=settings.TELEGRAM_COMMAND_RATE_WINDOW_SECONDS,
+)
 
 # Module-level paper service (lazy-loaded)
 _paper_service: PaperTradingService | None = None
@@ -324,6 +338,12 @@ def _before_analysis_paper_check(
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start command."""
+    if not check_rate_limit(update.effective_chat.id, _rate_limit_config):
+        await update.message.reply_text(
+            "⏳ Too many requests. Please wait a moment before trying again."
+        )
+        return
+
     paper_status = "Enabled" if settings.PAPER_TRADING else "Disabled"
     guardian_status = "Active" if settings.GUARDIAN_MODE else "Inactive"
 
@@ -339,6 +359,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /help command."""
+    if not check_rate_limit(update.effective_chat.id, _rate_limit_config):
+        await update.message.reply_text(
+            "⏳ Too many requests. Please wait a moment before trying again."
+        )
+        return
+
     message = (
         "📋 Available Commands:\n\n"
         "/start - Initialize bot and check status\n"
@@ -357,17 +383,35 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /ping command."""
+    if not check_rate_limit(update.effective_chat.id, _rate_limit_config):
+        await update.message.reply_text(
+            "⏳ Too many requests. Please wait a moment before trying again."
+        )
+        return
+
     await update.message.reply_text("🏓 Pong!")
 
 
 async def version(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /version command."""
+    if not check_rate_limit(update.effective_chat.id, _rate_limit_config):
+        await update.message.reply_text(
+            "⏳ Too many requests. Please wait a moment before trying again."
+        )
+        return
+
     from main import __version__
     await update.message.reply_text(f"MuzanTradeBot v{__version__}")
 
 
 async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Analyze a cryptocurrency through the full Guardian Mode pipeline."""
+    if not check_rate_limit(update.effective_chat.id, _rate_limit_config):
+        await update.message.reply_text(
+            "⏳ Too many requests. Please wait a moment before trying again."
+        )
+        return
+
     if context.args:
         coin = context.args[0].upper()
     else:
@@ -690,6 +734,12 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def paper_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show paper account summary."""
+    if not check_rate_limit(update.effective_chat.id, _rate_limit_config):
+        await update.message.reply_text(
+            "⏳ Too many requests. Please wait a moment before trying again."
+        )
+        return
+
     service = _get_paper_service()
     summary = service.summary()
     open_positions = service.open_positions()
@@ -732,6 +782,12 @@ async def positions_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """Show all open paper positions."""
+    if not check_rate_limit(update.effective_chat.id, _rate_limit_config):
+        await update.message.reply_text(
+            "⏳ Too many requests. Please wait a moment before trying again."
+        )
+        return
+
     service = _get_paper_service()
     open_positions = service.open_positions()
 
@@ -756,6 +812,12 @@ async def history_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """Show recently closed paper trades."""
+    if not check_rate_limit(update.effective_chat.id, _rate_limit_config):
+        await update.message.reply_text(
+            "⏳ Too many requests. Please wait a moment before trying again."
+        )
+        return
+
     service = _get_paper_service()
     closed_positions = service.closed_positions()
 
@@ -783,6 +845,12 @@ async def close_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """Close an open paper position. Usage: /close <SYMBOL> <EXIT_PRICE>"""
+    if not check_rate_limit(update.effective_chat.id, _rate_limit_config):
+        await update.message.reply_text(
+            "⏳ Too many requests. Please wait a moment before trying again."
+        )
+        return
+
     if len(context.args) < 2:
         await update.message.reply_text(
             "❌ Usage: /close <SYMBOL> <EXIT_PRICE>\n\n"
