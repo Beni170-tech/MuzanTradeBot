@@ -274,6 +274,7 @@ def _configure_and_run_analyze(
         broker = _make_broker(open_positions)
         service = MagicMock()
         service._broker = broker
+        service.execution_backend.return_value = broker
         service.open_positions.return_value = open_positions
         # The mock service must behave like the real PaperTradingService:
         # get_position() returns None when there is no pre-existing open
@@ -423,6 +424,7 @@ def _stats_runner(monkeypatch, max_open_positions: int, open_positions: list):
         service.closed_positions.return_value = _make_closed_positions(2)
         service.open_positions.return_value = open_positions
         service._broker = broker
+        service.execution_backend.return_value = broker
 
         with patch("telegram_bot.handlers._get_paper_service", return_value=service):
             update = MagicMock()

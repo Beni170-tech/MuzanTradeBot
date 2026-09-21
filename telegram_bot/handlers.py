@@ -507,11 +507,11 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 # trades that would exceed the configured limit.
                 if settings.PORTFOLIO_RISK_LIMIT > 0:
                     manager = PortfolioRiskManager(
-                        service._broker, settings.PORTFOLIO_RISK_LIMIT
+                        service.execution_backend(), settings.PORTFOLIO_RISK_LIMIT
                     )
                     if not manager.can_open_trade(trade):
                         current_risk = total_portfolio_risk(
-                            service._broker
+                            service.execution_backend()
                         )
                         message += (
                             f"\n⚠️ Portfolio Risk Limit Exceeded\n"
@@ -538,11 +538,11 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 if settings.PORTFOLIO_EXPOSURE_LIMIT > 0:
                     prospective = trade.price * trade.position_size
                     current_exposure = exposure_metrics(
-                        service._broker, 0.0
+                        service.execution_backend(), 0.0
                     ).current_exposure
                     if current_exposure + prospective > settings.PORTFOLIO_EXPOSURE_LIMIT:
                         metrics = exposure_metrics(
-                            service._broker, settings.PORTFOLIO_EXPOSURE_LIMIT
+                            service.execution_backend(), settings.PORTFOLIO_EXPOSURE_LIMIT
                         )
                         message += (
                             f"\n⚠️ Portfolio Exposure Limit Exceeded\n"
@@ -570,7 +570,7 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 # -limit (reaching the limit stops trading for the day).
                 if settings.PORTFOLIO_DAILY_LOSS_LIMIT > 0:
                     daily_risk_manager = DailyRiskManager(
-                        service._broker,
+                        service.execution_backend(),
                         settings.PORTFOLIO_DAILY_LOSS_LIMIT,
                     )
                     if not daily_risk_manager.evaluate().allowed:
@@ -608,7 +608,7 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 # configured limit.
                 if settings.PORTFOLIO_MAX_OPEN_POSITIONS > 0:
                     mgr = MaxOpenPositionsManager(
-                        service._broker,
+                        service.execution_backend(),
                         settings.PORTFOLIO_MAX_OPEN_POSITIONS,
                     )
                     mop_result = mgr.evaluate()
@@ -648,7 +648,7 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     or settings.PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL > 0
                 ):
                     concentration_manager = CorrelationRiskManager(
-                        service._broker,
+                        service.execution_backend(),
                         settings.PORTFOLIO_MAX_POSITIONS_PER_SYMBOL,
                         settings.PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL,
                     )
@@ -1014,7 +1014,7 @@ async def stats_command(
 
     # --- Section 3b: Portfolio Risk (Sprint 7A) ---
     if settings.PORTFOLIO_RISK_LIMIT > 0:
-        manager = PortfolioRiskManager(service._broker, settings.PORTFOLIO_RISK_LIMIT)
+        manager = PortfolioRiskManager(service.execution_backend(), settings.PORTFOLIO_RISK_LIMIT)
         prm = manager.metrics()
         message += (
             f"\n\n━━━━━━━━━━━━━━━━━━━\n"
@@ -1028,7 +1028,7 @@ async def stats_command(
 
     # --- Section 3c: Portfolio Exposure (Sprint 7B) ---
     if settings.PORTFOLIO_EXPOSURE_LIMIT > 0:
-        em = exposure_metrics(service._broker, settings.PORTFOLIO_EXPOSURE_LIMIT)
+        em = exposure_metrics(service.execution_backend(), settings.PORTFOLIO_EXPOSURE_LIMIT)
         message += (
             f"\n\n━━━━━━━━━━━━━━━━━━━\n"
             f"📊 Portfolio Exposure\n"
@@ -1045,7 +1045,7 @@ async def stats_command(
         or settings.PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL > 0
     ):
         concentration_manager = CorrelationRiskManager(
-            service._broker,
+            service.execution_backend(),
             settings.PORTFOLIO_MAX_POSITIONS_PER_SYMBOL,
             settings.PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL,
         )
@@ -1074,7 +1074,7 @@ async def stats_command(
     # --- Section 3e: Daily Risk (Sprint 8A) ---
     if settings.PORTFOLIO_DAILY_LOSS_LIMIT > 0:
         daily_risk_manager = DailyRiskManager(
-            service._broker,
+            service.execution_backend(),
             settings.PORTFOLIO_DAILY_LOSS_LIMIT,
         )
         daily_metrics = daily_risk_manager.metrics()
@@ -1098,7 +1098,7 @@ async def stats_command(
     # --- Section 3f: Maximum Open Positions (Sprint 8B) ---
     if settings.PORTFOLIO_MAX_OPEN_POSITIONS > 0:
         mgr = MaxOpenPositionsManager(
-            service._broker,
+            service.execution_backend(),
             settings.PORTFOLIO_MAX_OPEN_POSITIONS,
         )
         mop_metrics = mgr.metrics()

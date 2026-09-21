@@ -173,6 +173,7 @@ def _run_analyze(monkeypatch, *, alerts, service, settings_overrides=None, trade
             open_positions=service._open_positions_fixture,
             closed_positions=service._closed_positions_fixture,
         )
+        service.execution_backend.return_value = service._broker
 
         monkeypatch.setattr(h, "analyze_coin", lambda _: {"symbol": "X", "price": trade_price})
         monkeypatch.setattr(h, "make_decision", lambda r: MagicMock(approved=True))
