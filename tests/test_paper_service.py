@@ -2,6 +2,7 @@
 
 import pytest
 
+from trader.execution.contract import ExecutionBackend
 from trader.paper.account import PaperAccount
 from trader.paper.broker import PaperBroker
 from trader.paper.order import PaperOrderStatus
@@ -263,6 +264,36 @@ def test_close_position_requires_explicit_status() -> None:
 # ---------------------------------------------------------------------------
 # summary
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Execution backend access
+
+
+def test_execution_backend_returns_underlying_broker() -> None:
+    service = _make_service()
+    backend = service.execution_backend()
+    assert backend is service._broker
+
+
+def test_execution_backend_satisfies_execution_backend_contract() -> None:
+    service = _make_service()
+    backend = service.execution_backend()
+    assert isinstance(backend, ExecutionBackend)
+
+
+def test_execution_backend_is_same_instance_after_placement() -> None:
+    service = _make_service()
+    backend_a = service.execution_backend()
+    trade = _make_approved_trade(symbol="BTC", price=100.0, position_size=10.0)
+    service.place_trade(trade)
+    backend_b = service.execution_backend()
+    assert backend_a is backend_b
+    assert isinstance(backend_b, ExecutionBackend)
+
+
+# ---------------------------------------------------------------------------
+# summary
+
 
 def test_summary_empty_account() -> None:
     service = _make_service()

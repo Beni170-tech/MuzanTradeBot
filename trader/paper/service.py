@@ -14,8 +14,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from trader.execution.contract import ExecutionBackend
 from trader.paper.account import PaperAccount
 from trader.paper.broker import PaperBroker
+
+
 from trader.paper.executor import (
     close_paper_position,
     get_open_position,
@@ -107,6 +110,24 @@ class PaperTradingService:
         account = storage_load_account(path)
         broker = PaperBroker(account)
         return cls(account, broker)
+
+    # ------------------------------------------------------------------
+    # Execution backend access
+    # ------------------------------------------------------------------
+
+    def execution_backend(self) -> ExecutionBackend:
+        """Return the service's underlying execution backend.
+
+        This is the same PaperBroker instance the service already uses
+        internally. It is exposed as the ExecutionBackend abstraction so
+        callers can route execution and state queries through the
+        backend contract without changing the service's existing
+        placement behavior.
+
+        Returns:
+            The service's execution backend.
+        """
+        return self._broker
 
     # ------------------------------------------------------------------
     # Persistence
