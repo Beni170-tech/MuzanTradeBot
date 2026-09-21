@@ -26,6 +26,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from trader.execution.contract import ExecutionBackend
 from trader.paper.account import PaperAccount
 from trader.paper.order import PaperOrder, PaperOrderSide, PaperOrderStatus
 from trader.paper.rules import validate_paper_trade
@@ -88,7 +89,7 @@ def _coerce_entry_price(trade: Trade) -> float:
         return 0.0
 
 
-class PaperBroker:
+class PaperBroker(ExecutionBackend):
     """Paper broker facade for the paper trading engine.
 
     This class represents the paper trading broker aspect of the bot. It is
@@ -106,6 +107,11 @@ class PaperBroker:
         - close_order computes realized PnL, settles it into the
           account balance, and closes the position with a terminal status.
         - Helper methods for symbol-scoped position lookups are provided.
+
+    Sprint 10.1 scope:
+        - Satisfies ExecutionBackend so execution can be routed through a
+          backend-agnostic contract while the underlying behavior remains
+          unchanged.
     """
 
     def __init__(self, account: PaperAccount) -> None:
@@ -267,4 +273,21 @@ class PaperBroker:
             currently open positions.
         """
         return sum(p.unrealized_pnl_for(p.entry_price) for p in self._account.open_positions)
+
+    def get_total_realized_pnl_by_symbol(self, symbol: str) -> float:
+        """Return realized PnL for one symbol across closed positions.
+
+        Args:
+            symbol: The symbol to filter by (case-insensitive).
+
+        Returns:
+            Sum of realized profit (positive) or loss (negative) for the
+            symbol across all closed positions.
+        """
+        symbol_upper = symbol.strip().upper()
+        return sum(
+            p.realized_pnl
+            for p in self._account.closed_positions
+            if p.symbol == symbol_upper
+        )
 

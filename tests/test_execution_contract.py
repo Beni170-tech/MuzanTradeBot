@@ -137,6 +137,44 @@ def test_contract_get_open_pnl_reflects_open_trades() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Symbol-scoped contract compliance
+
+def test_contract_get_open_positions_by_symbol_returns_snapshot() -> None:
+    account = PaperAccount(initial_balance=1000.0, current_balance=1000.0)
+    broker = PaperBroker(account)
+    broker.place_order(_valid_trade(symbol="BTC"))
+    broker.place_order(_valid_trade(symbol="ETH", price=2000.0))
+    positions = broker.get_open_positions_by_symbol("BTC")
+    assert len(list(positions)) == 1
+    assert all(p.symbol == "BTC" for p in positions)
+
+
+def test_contract_get_closed_positions_by_symbol_returns_snapshot() -> None:
+    account = PaperAccount(initial_balance=1000.0, current_balance=1000.0)
+    broker = PaperBroker(account)
+    order = broker.place_order(_valid_trade(symbol="BTC", price=100.0, position_size=10.0))
+    assert order is not None
+    broker.close_order(order, exit_price=110.0, status=PaperOrderStatus.TAKEN_PROFIT)
+    positions = broker.get_closed_positions_by_symbol("BTC")
+    assert len(list(positions)) == 1
+    assert positions[0].symbol == "BTC"
+
+
+def test_contract_get_total_realized_pnl_by_symbol_reflects_closed_trades() -> None:
+    account = PaperAccount(initial_balance=1000.0, current_balance=1000.0)
+    broker = PaperBroker(account)
+    btc = broker.place_order(_valid_trade(symbol="BTC", price=100.0, position_size=10.0))
+    eth = broker.place_order(_valid_trade(symbol="ETH", price=2000.0, position_size=1.0))
+    assert btc is not None
+    assert eth is not None
+    broker.close_order(btc, exit_price=110.0, status=PaperOrderStatus.TAKEN_PROFIT)
+    broker.close_order(eth, exit_price=1900.0, status=PaperOrderStatus.STOPPED)
+    assert broker.get_total_realized_pnl_by_symbol("BTC") == pytest.approx(100.0)
+    assert broker.get_total_realized_pnl_by_symbol("ETH") == pytest.approx(-100.0)
+    assert broker.get_total_realized_pnl_by_symbol("SOL") == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
 # Contract behavior: placement refusal returns None, not raise
 # ---------------------------------------------------------------------------
 

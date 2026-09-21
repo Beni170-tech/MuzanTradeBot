@@ -1,8 +1,8 @@
 """Execution contract for MuzanTradeBot.
 
-Sprint 10.1: backend-agnostic contract for order placement and order
-closure so future paper and live backends can be swapped behind the
-same interface.
+Sprint 10.1: backend-agnostic contract for order placement, order closure,
+and portfolio-state queries so future paper and live backends can be swapped
+behind the same interface.
 
 This module intentionally does not place, close, persist, or notify.
 It only defines the contract and the result types that any backend
@@ -19,6 +19,13 @@ if TYPE_CHECKING:
 from trader.paper.order import PaperOrder, PaperOrderStatus
 
 
+# NOTE: This contract intentionally does not import or depend on any
+# live execution module. When a live backend is introduced it must be
+# added to config.settings._LIVE_EXECUTION_MODES explicitly, and the
+# startup safety check in main.py must still reject any config that
+# would enable live trading unintentionally.
+
+
 @runtime_checkable
 class ExecutionBackend(Protocol):
     """Backend-agnostic contract for placing and closing orders.
@@ -27,6 +34,10 @@ class ExecutionBackend(Protocol):
     paper broker, a future live broker, or a test double. The contract is
     deliberately small and does not prescribe persistence, alerting,
     market data, or account storage.
+
+    Placement and closure are the core execution operations. The query
+    methods below exist so portfolio and risk modules can inspect backend
+    state through the same interface used for execution.
     """
 
     # ------------------------------------------------------------------
@@ -105,5 +116,48 @@ class ExecutionBackend(Protocol):
         Returns:
             Sum of unrealized profit (positive) or loss (negative) across
             currently open orders.
+        """
+        ...
+
+    # ------------------------------------------------------------------
+    # Symbol-scoped queries
+    # ------------------------------------------------------------------
+
+    def get_open_positions_by_symbol(self, symbol: str):
+        """Return the backend's currently open orders for one symbol.
+
+        Args:
+            symbol: The symbol to filter by (case-insensitive).
+
+        Returns:
+            A sequence of open orders for the symbol. The returned value
+            must be a stable snapshot that callers cannot mutate to affect
+            backend state. Empty when there are no matching open orders.
+        """
+        ...
+
+    def get_closed_positions_by_symbol(self, symbol: str):
+        """Return the backend's closed orders for one symbol.
+
+        Args:
+            symbol: The symbol to filter by (case-insensitive).
+
+        Returns:
+            A sequence of closed orders for the symbol, most recent first.
+            The returned value must be a stable snapshot that callers
+            cannot mutate to affect backend state. Empty when there are
+            no matching closed orders.
+        """
+        ...
+
+    def get_total_realized_pnl_by_symbol(self, symbol: str) -> float:
+        """Return realized PnL for one symbol across closed orders.
+
+        Args:
+            symbol: The symbol to filter by (case-insensitive).
+
+        Returns:
+            Sum of realized profit (positive) or loss (negative) for the
+            symbol across all closed orders.
         """
         ...

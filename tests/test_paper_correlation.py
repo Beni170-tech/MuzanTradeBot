@@ -16,6 +16,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from trader.execution.contract import ExecutionBackend
+from trader.paper.account import PaperAccount
+from trader.paper.broker import PaperBroker
 from trader.paper.correlation_risk import (
     CorrelationCheck,
     CorrelationMetrics,
@@ -25,7 +28,9 @@ from trader.paper.correlation_risk import (
     symbol_exposure,
     trade_exposure,
 )
+from trader.paper.order import PaperOrderStatus
 from trader.paper.analytics import position_exposure
+from trader.trade import Trade
 
 
 # ---------------------------------------------------------------------------
@@ -56,14 +61,22 @@ def _make_broker(open_positions=None):
     return broker
 
 
-def _make_trade(price=100.0, position_size=10.0, side="LONG", symbol="BTC"):
-    """Create a minimal mock of a Trade."""
-    trade = MagicMock()
-    trade.price = price
-    trade.position_size = position_size
-    trade.side = side
-    trade.symbol = symbol
-    return trade
+def _make_trade(price=100.0, position_size=10.0, side="LONG", symbol="BTC") -> Trade:
+    """Create a real Trade for contract/paper tests."""
+    return Trade(
+        symbol=symbol,
+        price=price,
+        trend="Bullish",
+        signal="BUY",
+        confidence=80,
+        decision="BUY",
+        risk_verdict="APPROVED",
+        position_size=position_size,
+        stop_loss=98.0,
+        take_profit=104.0,
+        side=side,
+        approved=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -693,3 +706,35 @@ class TestStatsConcentrationSection:
         section_enabled = max_positions > 0 or max_exposure > 0
 
         assert section_enabled is False
+
+
+class TestExecutionBackendSymbolQueries:
+    """Focused contract tests for the new symbol-scoped query methods."""
+
+    def test_get_open_positions_by_symbol_is_case_insensitive(self):
+        account = PaperAccount(initial_balance=1000.0, current_balance=1000.0)
+        broker = PaperBroker(account)
+        broker.place_order(_make_trade(symbol="BTC"))
+        assert len(list(broker.get_open_positions_by_symbol("btc"))) == 1
+
+    def test_get_closed_positions_by_symbol_is_case_insensitive(self):
+        account = PaperAccount(initial_balance=1000.0, current_balance=1000.0)
+        broker = PaperBroker(account)
+        order = broker.place_order(_make_trade(symbol="BTC", price=100.0, position_size=10.0))
+        assert order is not None
+        broker.close_order(order, exit_price=100.0, status=PaperOrderStatus.CLOSED_MANUAL)
+        assert len(list(broker.get_closed_positions_by_symbol("btc"))) == 1
+
+    def test_get_closed_positions_by_symbol_returns_most_recent_first(self):
+        account = PaperAccount(initial_balance=1000.0, current_balance=1000.0)
+        broker = PaperBroker(account)
+        o1 = broker.place_order(_make_trade(symbol="BTC", price=100.0))
+        o2 = broker.place_order(_make_trade(symbol="BTC", price=110.0, position_size=5.0))
+        assert o1 is not None
+        assert o2 is not None
+        broker.close_order(o1, exit_price=105.0, status=PaperOrderStatus.CLOSED_MANUAL, exit_at="2025-01-01 10:00:00")
+        broker.close_order(o2, exit_price=115.0, status=PaperOrderStatus.TAKEN_PROFIT, exit_at="2025-01-01 12:00:00")
+        closed = broker.get_closed_positions_by_symbol("BTC")
+        assert len(closed) == 2
+        assert closed[0].order_id == o2.order_id
+        assert closed[1].order_id == o1.order_id
