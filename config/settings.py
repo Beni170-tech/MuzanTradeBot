@@ -52,7 +52,13 @@ class Settings:
 
     # Bot Modes
     GUARDIAN_MODE: bool = os.getenv("GUARDIAN_MODE", "true").lower() in ("true", "1", "yes")
-    PAPER_TRADING: bool = os.getenv("PAPER_TRADING", "true").lower() in ("true", "1", "yes")
+
+    # Execution mode (Sprint 10.2)
+    # Determines which execution backend is active. PAPER is the safe
+    # default and the only supported mode for now. The mode is explicit
+    # and validated: an unrecognized value is treated as an unsafe config
+    # and must not enable live execution.
+    EXECUTION_MODE: str = os.getenv("EXECUTION_MODE", "PAPER").strip().upper()
 
     # Risk Profile (Guardian Mode parameters)
     ACCOUNT_BALANCE: float = _env_float("ACCOUNT_BALANCE", 1000.0)
@@ -141,6 +147,77 @@ class Settings:
         "TELEGRAM_COMMAND_RATE_WINDOW_SECONDS", 10.0
     )
 
+    PAPER_TRADING: bool = os.getenv("PAPER_TRADING", "true").lower() in ("true", "1", "yes")
+
+    # Valid execution modes (Sprint 10.2)
+    _VALID_EXECUTION_MODES = ("PAPER",)
+
+    # Live mode registry (Sprint 10.2)
+    # Keep this table small and explicit. Right now it is intentionally empty
+    # because no live mode exists yet. When a live mode is introduced it must
+    # be added here, not inferred from strings.
+    _LIVE_EXECUTION_MODES: tuple[str, ...] = ()
+
+    # Runtime source of truth for paper trading (Sprint 10.2 safety check).
+    # PAPER_TRADING remains the existing runtime switch. EXECUTION_MODE is the
+    # newer config label. They must not contradict each other while live
+    # execution is not implemented.
+    @classmethod
+    def execution_mode_is_safe_for_current_intent(cls) -> bool:
+        """Return True when EXECUTION_MODE is consistent with PAPER_TRADING.
+
+        This is a safety check, not a behavior change. It never enables live
+        trading and it does not replace PAPER_TRADING as the runtime source of
+        truth.
+
+        Current rules:
+        - PAPER_TRADING=True is allowed only with EXECUTION_MODE=PAPER.
+        - PAPER_TRADING=False is not a live mode. Since no live backend
+          exists, a disabled paper config is still treated as safe to start,
+          as long as the execution mode itself is valid.
+        - Any unrecognized EXECUTION_MODE is unsafe regardless of
+          PAPER_TRADING.
+        """
+        if cls.EXECUTION_MODE not in cls._VALID_EXECUTION_MODES:
+            return False
+
+        if cls.PAPER_TRADING:
+            # If paper trading is enabled, the only acceptable execution mode
+            # right now is PAPER.
+            return cls.EXECUTION_MODE == "PAPER"
+
+        # PAPER_TRADING=False is currently an "off" configuration. Because
+        # no live mode is implemented, this is not treated as a valid live
+        # execution mode and it never enables live behavior.
+        return True
+
+    @classmethod
+    def is_execution_mode_valid(cls) -> bool:
+        """Return True when the configured execution mode is recognized.
+
+        An invalid or unknown execution mode must never be treated as
+        live-enabled. The only valid mode right now is PAPER.
+        """
+        return cls.EXECUTION_MODE in cls._VALID_EXECUTION_MODES
+
+    @classmethod
+    def is_paper_mode(cls) -> bool:
+        """Return True when execution is explicitly in PAPER mode.
+
+        This is the safe default. Any future live mode must be enabled
+        explicitly and independently of this flag.
+        """
+        return cls.EXECUTION_MODE == "PAPER"
+
+    @classmethod
+    def is_live_mode(cls) -> bool:
+        """Return True when execution is explicitly in a live mode.
+
+        There is no live mode implemented yet, so this always returns
+        False for valid configurations.
+        """
+        return cls.EXECUTION_MODE in cls._LIVE_EXECUTION_MODES
+
     @classmethod
     def is_configured(cls) -> bool:
         """Check if at least one exchange API key is set."""
@@ -156,6 +233,7 @@ class Settings:
         return (
             f"Guardian Mode: {cls.GUARDIAN_MODE}\n"
             f"Paper Trading: {cls.PAPER_TRADING}\n"
+            f"Execution Mode: {cls.EXECUTION_MODE}\n"
             f"Exchanges Configured: {cls.is_configured()}"
         )
 

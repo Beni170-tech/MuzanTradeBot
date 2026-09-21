@@ -26,6 +26,18 @@ def main():
     print(f"Paper Trading: {settings.PAPER_TRADING}")
     print("---------------------------------")
 
+    # Validate execution mode safety (Sprint 10.2)
+    # An invalid or inconsistent execution mode must not start the bot.
+    # This uses the existing settings safety check; it does not enable
+    # any live trading behavior.
+    if not settings.execution_mode_is_safe_for_current_intent():
+        print("\n[ERROR] Execution mode configuration is not safe to start.")
+        print(f"  EXECUTION_MODE: {settings.EXECUTION_MODE}")
+        print(f"  PAPER_TRADING: {settings.PAPER_TRADING}")
+        print("  Valid modes: PAPER")
+        print("  Fix EXECUTION_MODE in your .env file (default is PAPER).")
+        sys.exit(1)
+
     # Validate Telegram token
     if not settings.TELEGRAM_BOT_TOKEN:
         print("\n[ERROR] TELEGRAM_BOT_TOKEN is not set.")
