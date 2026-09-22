@@ -113,6 +113,46 @@ def test_load_account_nonexistent_raises(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Backend construction seam (Sprint 10.3)
+# ---------------------------------------------------------------------------
+
+def _record_backend_construction(monkeypatch) -> list:
+    """Spy on the seam and return the accounts it was called with."""
+    accounts: list = []
+    original = PaperTradingService._create_backend
+
+    def spy(cls, account):
+        accounts.append(account)
+        return original(account)
+
+    monkeypatch.setattr(PaperTradingService, "_create_backend", classmethod(spy))
+    return accounts
+
+
+def test_create_new_account_uses_backend_seam(monkeypatch) -> None:
+    accounts = _record_backend_construction(monkeypatch)
+
+    service = PaperTradingService.create_new_account(1500.0)
+
+    assert len(accounts) == 1
+    assert isinstance(service._broker, PaperBroker)
+    assert service._broker.account is accounts[0]
+
+
+def test_load_account_uses_backend_seam(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "seam_load.json"
+    _make_service(2000.0).save_account(path)
+
+    accounts = _record_backend_construction(monkeypatch)
+
+    service = PaperTradingService.load_account(path)
+
+    assert len(accounts) == 1
+    assert isinstance(service._broker, PaperBroker)
+    assert service._broker.account is accounts[0]
+
+
+# ---------------------------------------------------------------------------
 # place_trade
 # ---------------------------------------------------------------------------
 

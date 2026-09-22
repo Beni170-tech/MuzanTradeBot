@@ -72,6 +72,25 @@ class PaperTradingService:
     # ------------------------------------------------------------------
 
     @classmethod
+    def _create_backend(cls, account: PaperAccount) -> PaperBroker:
+        """Build the execution backend for a paper account.
+
+        Sprint 10.3: this is the single seam where the service constructs
+        the backend it will trade through. It currently always returns a
+        PaperBroker, so PAPER behavior is exactly what it was before.
+        Any future backend selection belongs here and nowhere else: the
+        factory methods below must keep going through this seam.
+
+        Args:
+            account: The PaperAccount the backend writes positions into.
+
+        Returns:
+            The execution backend for the account. Today this is always a
+            new PaperBroker.
+        """
+        return PaperBroker(account)
+
+    @classmethod
     def create_new_account(cls, initial_balance: float = 1000.0) -> PaperTradingService:
         """Create a new paper trading service with a fresh account.
 
@@ -86,7 +105,7 @@ class PaperTradingService:
             initial_balance=initial_balance,
             current_balance=initial_balance,
         )
-        broker = PaperBroker(account)
+        broker = cls._create_backend(account)
         return cls(account, broker)
 
     @classmethod
@@ -108,7 +127,7 @@ class PaperTradingService:
             ValueError: If the file contains invalid data.
         """
         account = storage_load_account(path)
-        broker = PaperBroker(account)
+        broker = cls._create_backend(account)
         return cls(account, broker)
 
     # ------------------------------------------------------------------
@@ -192,6 +211,10 @@ class PaperTradingService:
 
     def summary(self) -> PaperAccountSummary:
         """Build a typed summary of the current paper account state.
+
+        Sprint 10.3: the summary is built entirely through the
+        ExecutionBackend contract, so this no longer depends on the
+        concrete PaperBroker or its ``account`` attribute.
 
         Returns:
             A PaperAccountSummary with open positions, closed count,

@@ -274,6 +274,39 @@ class PaperBroker(ExecutionBackend):
         """
         return sum(p.unrealized_pnl_for(p.entry_price) for p in self._account.open_positions)
 
+    def get_initial_balance(self) -> float:
+        """Return the starting balance of the broker's account.
+
+        Returns:
+            The balance the account was opened with.
+        """
+        return self._account.initial_balance
+
+    def get_current_balance(self) -> float:
+        """Return the settled balance of the broker's account.
+
+        Returns:
+            The current balance, already including realized PnL from
+            closed positions but excluding unrealized PnL.
+        """
+        return self._account.current_balance
+
+    def get_closed_count(self) -> int:
+        """Return how many positions the broker has closed.
+
+        Returns:
+            The number of closed positions.
+        """
+        return self._account.closed_count
+
+    def get_equity(self) -> float:
+        """Return the broker account's current equity.
+
+        Returns:
+            The settled balance plus unrealized PnL across open positions.
+        """
+        return self._account.equity()
+
     def get_total_realized_pnl_by_symbol(self, symbol: str) -> float:
         """Return realized PnL for one symbol across closed positions.
 

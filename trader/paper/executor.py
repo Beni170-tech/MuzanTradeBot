@@ -7,6 +7,7 @@ without modifying any production trading logic.
 
 from __future__ import annotations
 
+from trader.execution.contract import ExecutionBackend
 from trader.paper.account import PaperAccount
 from trader.paper.broker import PaperBroker
 from trader.paper.order import PaperOrder, PaperOrderStatus
@@ -95,23 +96,26 @@ def get_open_position(broker: PaperBroker, symbol: str) -> PaperOrder | None:
     return positions[0]
 
 
-def get_paper_summary(broker: PaperBroker) -> PaperAccountSummary:
-    """Build a typed summary of the paper account state.
+def get_paper_summary(backend: ExecutionBackend) -> PaperAccountSummary:
+    """Build a typed summary of the backend's account state.
+
+    Sprint 10.3: every value is read through the ExecutionBackend
+    contract, so the summary no longer needs to reach into a
+    paper-specific ``broker.account`` attribute.
 
     Args:
-        broker: The PaperBroker to summarize.
+        backend: The execution backend to summarize.
 
     Returns:
         A PaperAccountSummary with open positions, closed count, and
         realized/unrealized PnL totals.
     """
-    account = broker.account
     return PaperAccountSummary(
-        initial_balance=account.initial_balance,
-        current_balance=account.current_balance,
-        open_positions=list(broker.get_open_positions()),
-        closed_count=account.closed_count,
-        total_realized_pnl=broker.get_total_realized_pnl(),
-        open_pnl=broker.get_open_pnl(),
-        equity=account.equity(),
+        initial_balance=backend.get_initial_balance(),
+        current_balance=backend.get_current_balance(),
+        open_positions=list(backend.get_open_positions()),
+        closed_count=backend.get_closed_count(),
+        total_realized_pnl=backend.get_total_realized_pnl(),
+        open_pnl=backend.get_open_pnl(),
+        equity=backend.get_equity(),
     )

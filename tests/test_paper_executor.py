@@ -435,3 +435,46 @@ def test_executor_does_not_place_unapproved_trade() -> None:
     summary = get_paper_summary(broker)
     assert summary.closed_count == 0
     assert summary.total_realized_pnl == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Sprint 10.3: summary is built through the execution contract
+# ---------------------------------------------------------------------------
+
+def test_get_paper_summary_reads_state_through_contract() -> None:
+    """A backend with no paper-specific ``account`` attribute summarises fine."""
+
+    class Backend:
+        def get_initial_balance(self) -> float:
+            return 500.0
+
+        def get_current_balance(self) -> float:
+            return 640.0
+
+        def get_closed_count(self) -> int:
+            return 3
+
+        def get_equity(self) -> float:
+            return 630.0
+
+        def get_open_positions(self) -> tuple:
+            return ()
+
+        def get_total_realized_pnl(self) -> float:
+            return 140.0
+
+        def get_open_pnl(self) -> float:
+            return -10.0
+
+    backend = Backend()
+    assert not hasattr(backend, "account")
+
+    summary = get_paper_summary(backend)
+
+    assert summary.initial_balance == 500.0
+    assert summary.current_balance == 640.0
+    assert summary.closed_count == 3
+    assert summary.equity == 630.0
+    assert summary.total_realized_pnl == 140.0
+    assert summary.open_pnl == -10.0
+    assert summary.open_positions == []

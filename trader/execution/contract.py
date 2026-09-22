@@ -120,6 +120,43 @@ class ExecutionBackend(Protocol):
         ...
 
     # ------------------------------------------------------------------
+    # Account state
+    # ------------------------------------------------------------------
+
+    def get_initial_balance(self) -> float:
+        """Return the starting balance of the backend's account.
+
+        Returns:
+            The balance the account was opened with.
+        """
+        ...
+
+    def get_current_balance(self) -> float:
+        """Return the settled balance of the backend's account.
+
+        Returns:
+            The current balance, already including realized PnL from
+            closed orders but excluding unrealized PnL.
+        """
+        ...
+
+    def get_closed_count(self) -> int:
+        """Return how many orders the backend has closed.
+
+        Returns:
+            The number of closed orders.
+        """
+        ...
+
+    def get_equity(self) -> float:
+        """Return the backend account's current equity.
+
+        Returns:
+            The settled balance plus unrealized PnL across open orders.
+        """
+        ...
+
+    # ------------------------------------------------------------------
     # Symbol-scoped queries
     # ------------------------------------------------------------------
 
