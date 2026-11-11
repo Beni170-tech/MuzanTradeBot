@@ -103,9 +103,10 @@ class PaperPositionMonitor:
             trailing_fn: Optional override for the trailing-stop function.
                 Defaults to the real ``_apply_trailing_stop`` from the
                 handler layer.
-            price_provider: Optional callable returning a fresh market
-                price for a symbol, or None when no reliable price is
-                available. Defaults to
+            price_provider: Optional synchronous callable returning a
+                fresh market price for a symbol, or None when no reliable
+                price is available. It is invoked in a worker thread so a
+                slow lookup never blocks the event loop. Defaults to
                 :func:`market.analyzer.get_current_price`.
         """
         if interval_seconds <= 0:
@@ -243,8 +244,13 @@ class PaperPositionMonitor:
                     position.symbol,
                 )
 
-    def _market_price(self, position: "PaperOrder") -> float | None:
+    async def _market_price(self, position: "PaperOrder") -> float | None:
         """Return a fresh, validated market price for a position.
+
+        The price provider is synchronous (it performs an HTTP request),
+        so it runs in a worker thread via ``asyncio.to_thread``. This
+        keeps a slow market-data request from blocking the Telegram
+        event loop and delaying polling.
 
         Failures and invalid values return None. The caller must skip the
         position for this cycle; the entry price is never used as a
@@ -260,7 +266,7 @@ class PaperPositionMonitor:
         """
         symbol = position.symbol
         try:
-            price = self._price_provider(symbol)
+            price = await asyncio.to_thread(self._price_provider, symbol)
         except Exception:
             logger.warning(
                 "Market price lookup failed for %s; skipping this "
@@ -301,7 +307,7 @@ class PaperPositionMonitor:
         """
         symbol = position.symbol
 
-        price = self._market_price(position)
+        price = await self._market_price(position)
         if price is None:
             logger.warning(
                 "Skipping paper position %s (%s): no reliable market "

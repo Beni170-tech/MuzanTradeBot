@@ -34,9 +34,11 @@ reached.
 
 Each cycle obtains a fresh USD market price from CoinGecko's simple-price
 endpoint for the supported symbols (BTC, ETH, SOL), reusing the existing
-market-data integration. If a price cannot be retrieved or is not a valid
-positive number, that position is skipped for the cycle and retried on
-the next one; the entry price is never used as a substitute.
+market-data integration. The synchronous HTTP lookup runs in a worker
+thread, so a slow request cannot block Telegram polling. If a price
+cannot be retrieved or is not a valid positive number, that position is
+skipped for the cycle and retried on the next one; the entry price is
+never used as a substitute.
 
 All monitoring actions remain simulated paper-trading operations. No live
 orders are placed.

@@ -8,8 +8,10 @@ substituted, so no network access is required.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time
 
 import pytest
 
@@ -356,3 +358,47 @@ def test_get_current_price_returns_none_for_unsupported_symbol(monkeypatch):
     monkeypatch.setattr(analyzer.urllib.request, "urlopen", no_network)
 
     assert get_current_price("DOGE") is None
+
+
+# ---------------------------------------------------------------------------
+# The synchronous lookup must not block the event loop
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_slow_price_lookup_does_not_block_event_loop(paper_state):
+    """A slow synchronous provider must run off the event-loop thread."""
+    service, (order,) = _service_with(
+        _make_trade(stop_loss=90.0, take_profit=120.0)
+    )
+
+    def slow_provider(symbol):
+        time.sleep(0.2)
+        return None
+
+    monitor = _monitor(service, slow_provider)
+    ticks = 0
+
+    async def ticker() -> None:
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.01)
+            ticks += 1
+
+    ticker_task = asyncio.create_task(ticker())
+    monitor_task = asyncio.create_task(monitor.monitor_open_positions())
+
+    # The provider is sleeping for 0.2s. If the event loop were blocked,
+    # this coroutine could not resume until the lookup returned and the
+    # ticker would have made no progress.
+    await asyncio.sleep(0.05)
+    assert ticks >= 1
+
+    await monitor_task
+    ticker_task.cancel()
+    try:
+        await ticker_task
+    except asyncio.CancelledError:
+        pass
+
+    assert order.status == PaperOrderStatus.OPEN
