@@ -7,6 +7,7 @@ the exact schema the rest of the pipeline depends on.
 """
 
 import json
+import math
 import urllib.request
 
 from market.indicators import MIN_CANDLES, compute_analysis
@@ -22,6 +23,49 @@ COINGECKO_IDS = {
 # How many days of history to fetch. CoinGecko returns hourly candles
 # for ranges up to 90 days, so 30 days yields ~720 bars per coin.
 MARKET_CHART_DAYS = 30
+
+# CoinGecko's lightweight simple-price endpoint returns one current price
+# per coin. The background paper monitor polls this instead of downloading
+# 30 days of chart history on every cycle.
+SIMPLE_PRICE_URL = "https://api.coingecko.com/api/v3/simple/price"
+
+
+def get_current_price(symbol: str) -> float | None:
+    """Return the latest USD market price for a supported symbol.
+
+    Uses the same CoinGecko coin-id mapping as :func:`analyze_coin`, but
+    fetches only the current simple price (no historical chart data), so
+    it is suitable for the background paper position monitor.
+
+    Args:
+        symbol: The cryptocurrency symbol (e.g. "BTC").
+
+    Returns:
+        The current price as a positive finite float, or None when the
+        symbol is unsupported, the request fails, or the response does
+        not contain a usable price. Callers must treat None as "no
+        reliable price" and never fall back to a stored price.
+    """
+    if not isinstance(symbol, str):
+        return None
+
+    coin_id = COINGECKO_IDS.get(symbol.strip().upper())
+    if coin_id is None:
+        return None
+
+    url = f"{SIMPLE_PRICE_URL}?ids={coin_id}&vs_currencies=usd"
+    try:
+        with urllib.request.urlopen(url, timeout=10) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        price = data[coin_id]["usd"]
+    except Exception:
+        return None
+
+    if isinstance(price, bool) or not isinstance(price, (int, float)):
+        return None
+    if not math.isfinite(price) or price <= 0:
+        return None
+    return float(price)
 
 
 def analyze_coin(symbol: str) -> dict:

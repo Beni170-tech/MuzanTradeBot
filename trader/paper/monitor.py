@@ -5,6 +5,11 @@ Monitors all open paper-trading positions automatically in the
 background and closes them when stop-loss or take-profit levels are
 hit, and updates trailing stops when appropriate.
 
+Every cycle obtains a fresh market price for each position through the
+existing CoinGecko integration. If a reliable price cannot be obtained
+or is invalid, that position is skipped for the cycle and retried
+later; the entry price is never used as a substitute.
+
 The monitor runs as an asyncio task in the Telegram event loop on a
 configurable interval, so it never blocks Telegram polling. It reuses
 the existing paper-trading SL/TP and trailing-stop logic from the
@@ -19,7 +24,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from typing import TYPE_CHECKING, Callable
+
+from market.analyzer import get_current_price
 
 if TYPE_CHECKING:
     from alerts.manager import AlertManager
@@ -78,6 +86,7 @@ class PaperPositionMonitor:
         *,
         sltp_check: _SltpCheckFn | None = None,
         trailing_fn: _TrailingFn | None = None,
+        price_provider: Callable[[str], float | None] | None = None,
     ) -> None:
         """Initialize the monitor.
 
@@ -94,6 +103,10 @@ class PaperPositionMonitor:
             trailing_fn: Optional override for the trailing-stop function.
                 Defaults to the real ``_apply_trailing_stop`` from the
                 handler layer.
+            price_provider: Optional callable returning a fresh market
+                price for a symbol, or None when no reliable price is
+                available. Defaults to
+                :func:`market.analyzer.get_current_price`.
         """
         if interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")
@@ -105,6 +118,10 @@ class PaperPositionMonitor:
         # Allow tests to inject mock SL/TP and trailing-stop functions.
         self._sltp_check = sltp_check or _default_sltp_check()
         self._trailing_fn = trailing_fn or _default_trailing()
+
+        # Market price source. The default reuses the existing CoinGecko
+        # integration; tests inject a deterministic provider.
+        self._price_provider = price_provider or get_current_price
 
         self._task: asyncio.Task[None] | None = None
         self._running = False
@@ -226,18 +243,76 @@ class PaperPositionMonitor:
                     position.symbol,
                 )
 
+    def _market_price(self, position: "PaperOrder") -> float | None:
+        """Return a fresh, validated market price for a position.
+
+        Failures and invalid values return None. The caller must skip the
+        position for this cycle; the entry price is never used as a
+        fallback, because a stale price would make stop-loss and
+        take-profit checks meaningless.
+
+        Args:
+            position: The open PaperOrder being monitored.
+
+        Returns:
+            A positive finite float price, or None when no reliable price
+            could be obtained.
+        """
+        symbol = position.symbol
+        try:
+            price = self._price_provider(symbol)
+        except Exception:
+            logger.warning(
+                "Market price lookup failed for %s; skipping this "
+                "position for this cycle.",
+                symbol,
+                exc_info=True,
+            )
+            return None
+
+        if isinstance(price, bool) or not isinstance(price, (int, float)):
+            logger.warning(
+                "Market price for %s is not a usable number (%r); "
+                "skipping this position for this cycle.",
+                symbol,
+                price,
+            )
+            return None
+        if not math.isfinite(price) or price <= 0:
+            logger.warning(
+                "Market price for %s is invalid (%r); skipping this "
+                "position for this cycle.",
+                symbol,
+                price,
+            )
+            return None
+
+        return float(price)
+
     async def _monitor_position(self, position: "PaperOrder") -> None:
         """Monitor a single open position for SL/TP and trailing-stop.
+
+        A fresh market price is required for every decision. When no
+        reliable price is available, the position is skipped for this
+        cycle and retried on the next one.
 
         Args:
             position: The open PaperOrder to monitor.
         """
         symbol = position.symbol
 
+        price = self._market_price(position)
+        if price is None:
+            logger.warning(
+                "Skipping paper position %s (%s): no reliable market "
+                "price available; it will be retried next cycle.",
+                position.order_id,
+                symbol,
+            )
+            return
+
         # 1. Check stop-loss / take-profit first (Guardian Mode priority).
-        closed = self._sltp_check(
-            self._service, symbol, position.entry_price
-        )
+        closed = self._sltp_check(self._service, symbol, price)
         if closed is not None:
             # The helper already saved the account and closed the position.
             # Push the matching alert so the user is notified even when
@@ -253,9 +328,7 @@ class PaperPositionMonitor:
 
         # 2. Apply trailing stop (if applicable). When it changes the
         #    stop, push an alert.
-        trail_result = self._trailing_fn(
-            self._service, symbol, position.entry_price
-        )
+        trail_result = self._trailing_fn(self._service, symbol, price)
         if trail_result is not None:
             changed, old_stop, new_stop = trail_result
             if changed:

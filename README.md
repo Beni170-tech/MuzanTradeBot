@@ -23,3 +23,20 @@ MuzanTradeBot is designed to provide automated trading assistance via Telegram w
 - `logs/` - Application logs (git-ignored)
 - `tests/` - Test suite
 - `docs/` - Documentation
+
+## Background Paper Position Monitor
+
+When paper trading is enabled, the bot runs a background monitor that
+checks every open paper position on the interval configured by
+`PAPER_MONITOR_INTERVAL_SECONDS` (default 45 seconds). It updates trailing
+stops and closes positions when stop-loss or take-profit levels are
+reached.
+
+Each cycle obtains a fresh USD market price from CoinGecko's simple-price
+endpoint for the supported symbols (BTC, ETH, SOL), reusing the existing
+market-data integration. If a price cannot be retrieved or is not a valid
+positive number, that position is skipped for the cycle and retried on
+the next one; the entry price is never used as a substitute.
+
+All monitoring actions remain simulated paper-trading operations. No live
+orders are placed.

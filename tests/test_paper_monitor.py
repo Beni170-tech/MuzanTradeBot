@@ -19,6 +19,18 @@ from trader.paper.monitor import PaperPositionMonitor
 from trader.paper.order import PaperOrderStatus
 
 
+@pytest.fixture(autouse=True)
+def _fixed_market_price(monkeypatch):
+    """Keep these lifecycle/alert tests offline with a fixed price.
+
+    Market-price retrieval and real-handler behaviour are covered by
+    tests/test_paper_monitor_market_price.py.
+    """
+    monkeypatch.setattr(
+        "trader.paper.monitor.get_current_price", lambda symbol: 100.0
+    )
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
