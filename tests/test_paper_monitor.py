@@ -11,6 +11,7 @@ shutdown, and Telegram application compatibility.
 from __future__ import annotations
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -522,6 +523,93 @@ class TestCleanShutdown:
         monitor.start()
         monitor.stop()
         assert monitor._service is service
+
+
+class TestAsyncShutdown:
+
+    @pytest.mark.asyncio
+    async def test_aclose_cancels_and_awaits_running_task(self):
+        monitor = PaperPositionMonitor(
+            MagicMock(), _make_alerts(), interval_seconds=10.0
+        )
+        monitor.start()
+        task = monitor._task
+
+        await monitor.aclose()
+
+        assert task.done()
+        assert monitor._task is None
+        assert monitor.is_running is False
+
+    @pytest.mark.asyncio
+    async def test_aclose_with_no_task_is_safe(self):
+        monitor = PaperPositionMonitor(MagicMock(), _make_alerts())
+
+        await monitor.aclose()
+
+        assert monitor._task is None
+        assert monitor.is_running is False
+
+    @pytest.mark.asyncio
+    async def test_aclose_twice_is_safe(self):
+        monitor = PaperPositionMonitor(
+            MagicMock(), _make_alerts(), interval_seconds=10.0
+        )
+        monitor.start()
+
+        await monitor.aclose()
+        await monitor.aclose()
+
+        assert monitor._task is None
+        assert monitor.is_running is False
+
+    def test_stop_with_already_finished_task_is_safe(self):
+        monitor = PaperPositionMonitor(MagicMock(), _make_alerts())
+        loop = asyncio.new_event_loop()
+        try:
+            task = loop.create_task(asyncio.sleep(0))
+            loop.run_until_complete(task)
+            monitor._running = True
+            monitor._task = task
+
+            monitor.stop()
+
+            assert monitor._task is None
+            assert monitor.is_running is False
+        finally:
+            loop.close()
+
+    def test_stop_after_loop_closed_does_not_raise(self, caplog):
+        monitor = PaperPositionMonitor(
+            MagicMock(), _make_alerts(), interval_seconds=10.0
+        )
+        monitor.start()
+        task = monitor._task
+        loop = task.get_loop()
+        loop.run_until_complete(asyncio.sleep(0))
+        loop.close()
+
+        with caplog.at_level(logging.WARNING, logger="trader.paper.monitor"):
+            monitor.stop()
+
+        assert monitor._task is None
+        assert monitor.is_running is False
+        assert "event loop is already closed" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_stop_from_running_loop_does_not_raise(self):
+        monitor = PaperPositionMonitor(
+            MagicMock(), _make_alerts(), interval_seconds=10.0
+        )
+        monitor.start()
+        task = monitor._task
+
+        monitor.stop()
+        await asyncio.sleep(0.01)
+
+        assert monitor._task is None
+        assert task.done()
+        assert monitor.is_running is False
 
 
 # ---------------------------------------------------------------------------

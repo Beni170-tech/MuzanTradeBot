@@ -164,33 +164,94 @@ class PaperPositionMonitor:
             self._interval,
         )
 
-    def stop(self) -> None:
-        """Signal the monitor to stop. The task is cancelled and awaited.
+    async def aclose(self) -> None:
+        """Cancel and await the monitoring task on the running loop.
 
-        Calls :meth:`stop` are idempotent. When the monitor is not
-        running, this is a no-op.
+        This is the production shutdown path. It must be called while the
+        task's event loop is still open, for example from PTB's
+        ``post_shutdown`` hook. It is safe to call when the monitor was
+        never started, already stopped, or its task already finished.
 
-        Note: In production, the bot's shutdown path handles task
-        cancellation directly. This method is primarily for tests and
-        direct usage.
+        Cancellation is requested and then awaited, so no pending monitor
+        task is left behind for the event loop to destroy.
         """
-        if not self._running:
+        self._running = False
+        task = self._task
+        self._task = None
+
+        if task is None or task.done():
+            return
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning(
+                "Paper position monitor aclose() requires a running event "
+                "loop; the task was not cancelled or awaited."
+            )
+            return
+
+        if task.get_loop() is not running_loop:
+            logger.warning(
+                "Paper position monitor task belongs to a different event "
+                "loop; the task was not cancelled or awaited."
+            )
+            return
+
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        logger.info("Paper position monitor stopped.")
+
+    def stop(self) -> None:
+        """Request monitor shutdown from synchronous code.
+
+        This is a best-effort fallback for synchronous callers and tests.
+        It is idempotent and never raises: if the task's event loop is
+        already closed, or stop() is called from inside a running loop,
+        the task cannot be awaited here and a warning is logged instead.
+
+        Prefer :meth:`aclose` on a running event loop to cancel and await
+        the monitoring task cleanly.
+        """
+        if self._task is None and not self._running:
             return
 
         self._running = False
         task = self._task
         self._task = None
 
-        if task is not None and not task.done():
+        if task is None or task.done():
+            return
+
+        loop = task.get_loop()
+        if loop.is_closed():
+            logger.warning(
+                "Paper position monitor task cannot be cancelled because "
+                "its event loop is already closed; use aclose() while the "
+                "loop is running."
+            )
+            return
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            logger.info(
+                "Paper position monitor stop() called from a running event "
+                "loop; cancellation requested but not awaited. Use aclose() "
+                "to await completion."
+            )
             task.cancel()
-            try:
-                # Try to run the loop to completion; this may fail if
-                # no loop is running, which is fine.
-                asyncio.get_event_loop().run_until_complete(task)
-            except (RuntimeError, asyncio.CancelledError):
-                pass
-            except Exception:
-                logger.exception("Monitor task error during stop.")
+            return
+
+        task.cancel()
+        try:
+            loop.run_until_complete(task)
+        except (RuntimeError, asyncio.CancelledError):
+            pass
+        except Exception:
+            logger.exception("Monitor task error during stop.")
 
         logger.info("Paper position monitor stopped.")
 

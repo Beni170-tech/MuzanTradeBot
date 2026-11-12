@@ -40,5 +40,8 @@ cannot be retrieved or is not a valid positive number, that position is
 skipped for the cycle and retried on the next one; the entry price is
 never used as a substitute.
 
+On shutdown, the monitor task is cancelled and awaited from the Telegram
+application's `post_shutdown` hook while the event loop is still open.
+
 All monitoring actions remain simulated paper-trading operations. No live
 orders are placed.

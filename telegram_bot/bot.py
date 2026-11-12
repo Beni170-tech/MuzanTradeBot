@@ -72,15 +72,37 @@ def _build_paper_monitor() -> PaperPositionMonitor | None:
     return monitor
 
 
+async def _shutdown_paper_monitor(application) -> None:
+    """Cancel and await the paper monitor from PTB's post_shutdown hook.
+
+    python-telegram-bot calls ``post_shutdown`` while the polling event
+    loop is still open and closes the loop only afterwards. Awaiting
+    ``aclose()`` here guarantees the monitor task is finished rather than
+    left pending for the loop to destroy.
+    """
+    if _paper_monitor is None:
+        return
+    try:
+        await _paper_monitor.aclose()
+    except Exception:
+        logger.exception(
+            "Paper position monitor shutdown failed; the monitor task may "
+            "still be pending."
+        )
+
+
 def run_bot() -> None:
     """Start the Telegram bot with polling."""
     global _paper_monitor
 
     app = build_application()
 
+    # PTB runs this hook on the still-open polling loop immediately before
+    # it closes that loop, so the monitor can be cancelled and awaited.
+    app.post_shutdown = _shutdown_paper_monitor
+
     # Start the background position monitor when configured.
-    # The monitor runs in a daemon thread so it never blocks Telegram
-    # polling and stops automatically when the process exits.
+    # The monitor runs as an asyncio task on the polling loop.
     _paper_monitor = _build_paper_monitor()
     if _paper_monitor is not None:
         _paper_monitor.start()
@@ -92,7 +114,9 @@ def run_bot() -> None:
     try:
         app.run_polling(drop_pending_updates=True)
     finally:
-        # Clean shutdown: stop the monitor before the app fully exits.
+        # Fallback for paths where post_shutdown did not run. This is a
+        # no-op when the hook above already stopped the monitor, and it is
+        # safe to call after PTB has closed the loop.
         if _paper_monitor is not None:
             _paper_monitor.stop()
             logger.info("Background paper position monitor stopped during shutdown.")
