@@ -78,6 +78,19 @@ from a stale configured balance. `ACCOUNT_BALANCE` remains the starting
 balance for a new paper account and the sizing fallback only when paper
 trading is disabled.
 
+### /analyze Pricing
+
+`/analyze` keeps using historical hourly candles for trend, signal,
+confidence and the indicator snapshot, but it prices the trade from a
+fresh quote fetched with the existing simple-price helper. The current
+quote is used for the trade price, position sizing, stop-loss and
+take-profit levels, and the stop-loss/take-profit check against an
+existing position in that symbol. The last historical close is never
+used as an execution price: if the quote is missing, non-numeric,
+non-finite, zero or negative, the trade is not placed and the reply
+explains that the current market quote is unavailable. Only one quote
+request is made per `/analyze`.
+
 ### Multiple positions on one symbol
 
 The bot may hold several open paper positions on the same symbol. The

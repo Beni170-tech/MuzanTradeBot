@@ -176,6 +176,7 @@ def _run_analyze(monkeypatch, *, alerts, service, settings_overrides=None, trade
         service.execution_backend.return_value = service._broker
 
         monkeypatch.setattr(h, "analyze_coin", lambda _: {"symbol": "X", "price": trade_price})
+        monkeypatch.setattr(h, "get_current_price", lambda _: trade_price)
         monkeypatch.setattr(h, "make_decision", lambda r: MagicMock(approved=True))
         monkeypatch.setattr(
             h, "validate_trade", lambda d, r, p: MagicMock(approved=True)

@@ -108,6 +108,9 @@ def _run_analyze(monkeypatch, tmp_path, *, service, analysis=None) -> str:
 
         monkeypatch.setattr(handlers, "check_rate_limit", lambda *a, **k: True)
         monkeypatch.setattr(handlers, "analyze_coin", lambda _: dict(analysis))
+        monkeypatch.setattr(
+            handlers, "get_current_price", lambda _: analysis["price"]
+        )
         monkeypatch.setattr(handlers, "make_decision", lambda r: "BUY")
         monkeypatch.setattr(handlers, "log_trade", MagicMock())
         monkeypatch.setattr(handlers, "_get_paper_service", lambda: service)

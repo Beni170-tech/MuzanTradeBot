@@ -431,6 +431,7 @@ class TestExitStatusHelperRegression:
         try:
             cfg_settings.settings.ALERTS_ENABLED = True
             with patch.object(h, "analyze_coin", return_value={"symbol": "BTC", "price": 50.0}), \
+                 patch.object(h, "get_current_price", return_value=50.0), \
                  patch.object(h, "make_decision", return_value=MagicMock(approved=True)), \
                  patch.object(h, "validate_trade", return_value=MagicMock(approved=True)), \
                  patch.object(h, "build_trade", return_value=trade), \

@@ -14,7 +14,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from config.settings import settings
-from market.analyzer import analyze_coin
+from market.analyzer import analyze_coin, get_current_price
 from brain.decision_engine import make_decision
 from risk.risk_manager import validate_trade
 from risk.risk_profile import RiskProfile
@@ -188,6 +188,53 @@ def _sizing_profile() -> RiskProfile:
         return RiskProfile.from_settings(settings)
     return RiskProfile.from_settings(
         settings, balance=_paper_equity_for_sizing()
+    )
+
+
+def _valid_current_price(value: object) -> float | None:
+    """Return a usable execution price, or None.
+
+    Only a finite, strictly positive number is accepted. Anything else
+    (missing, bool, string, zero, negative, NaN, infinity) means no
+    current quote and blocks the trade.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value) or value <= 0:
+        return None
+    return float(value)
+
+
+def _current_quote(symbol: str) -> float | None:
+    """Fetch the fresh execution quote for a symbol, or None.
+
+    Uses the existing simple-price helper (one request) and validates the
+    result. Never falls back to a historical close or a stored price.
+    """
+    try:
+        raw = get_current_price(symbol)
+    except Exception:
+        logger.warning(
+            "Current market quote lookup failed for %s; trade blocked.",
+            symbol,
+            exc_info=True,
+        )
+        return None
+    return _valid_current_price(raw)
+
+
+def _quote_unavailable_message(analysis: dict) -> str:
+    """Build the reply when the current execution quote is unavailable."""
+    return (
+        f"📊 Analysis for {analysis.get('symbol', '?')}\n\n"
+        f"Trend: {analysis.get('trend', 'Unknown')}\n"
+        f"Signal: {analysis.get('signal', 'Unknown')}\n"
+        f"Confidence: {analysis.get('confidence', 'Unknown')}%\n\n"
+        f"⛔ Trade Blocked: current market quote unavailable\n"
+        "   A valid current price could not be obtained for this symbol.\n"
+        "   The last historical close is never used as an execution price.\n"
+        "   No trade was placed.\n"
+        "   Try again once market data is available."
     )
 
 
@@ -648,6 +695,20 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     result = analyze_coin(coin)
+
+    # Historical candles drive trend/signal/confidence, but the trade must
+    # be priced from a fresh market quote. The chart's last close is a
+    # historical observation, not a current execution price.
+    quote = _current_quote(result.get("symbol", coin))
+    if quote is None:
+        logger.warning(
+            "No usable current market quote for %s; trade blocked.",
+            result.get("symbol", coin),
+        )
+        await update.message.reply_text(_quote_unavailable_message(result))
+        return
+
+    result = {**result, "price": quote}
     decision = make_decision(result)
 
     # Refuse to size a new trade from stale or missing market marks. This
