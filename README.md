@@ -78,6 +78,22 @@ from a stale configured balance. `ACCOUNT_BALANCE` remains the starting
 balance for a new paper account and the sizing fallback only when paper
 trading is disabled.
 
+### Multiple positions on one symbol
+
+The bot may hold several open paper positions on the same symbol. The
+background monitor treats each position independently: it records that
+position's own market mark and runs stop-loss, take-profit and
+trailing-stop checks against that exact position, closing it by order
+ID. Closing or trailing one position never touches another position
+with the same symbol.
+
+`/close <SYMBOL> <EXIT_PRICE>` keeps working when exactly one position
+exists for that symbol. When several positions share the symbol, the
+bot closes nothing and replies with each position's order ID; re-run
+`/close <SYMBOL> <EXIT_PRICE> <ORDER_ID>` to close exactly that
+position. An unknown or mismatched ID closes nothing, and a manual
+close never closes more than one position.
+
 ### Stale market marks
 
 Every recorded mark also stores a UTC timestamp (`mark_at`). Before a

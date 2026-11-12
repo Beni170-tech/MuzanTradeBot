@@ -241,8 +241,8 @@ class TestSLTPCLosure:
         # The sltp_check function simulates _before_analysis_paper_check:
         # it calls service.close_position() and service.save_account(),
         # then returns the closed order.
-        def sltp_mock(svc, symbol, current_price):
-            svc.close_position(symbol, 90.0, PaperOrderStatus.STOPPED)
+        def sltp_mock(svc, position, current_price):
+            svc.close_position(position.symbol, 90.0, PaperOrderStatus.STOPPED)
             svc.save_account()
             return closed
 
@@ -279,8 +279,10 @@ class TestSLTPCLosure:
         # The sltp_check function simulates _before_analysis_paper_check:
         # it calls service.close_position() and service.save_account(),
         # then returns the closed order.
-        def sltp_mock(svc, symbol, current_price):
-            svc.close_position(symbol, 110.0, PaperOrderStatus.TAKEN_PROFIT)
+        def sltp_mock(svc, position, current_price):
+            svc.close_position(
+                position.symbol, 110.0, PaperOrderStatus.TAKEN_PROFIT
+            )
             svc.save_account()
             return closed
 
@@ -336,8 +338,8 @@ class TestTrailingStopBehavior:
         )
 
         await monitor.monitor_open_positions()
-        sltp_mock.assert_called_once_with(service, "BTC", 100.0)
-        trail_mock.assert_called_once_with(service, "BTC", 100.0)
+        sltp_mock.assert_called_once_with(service, position, 100.0)
+        trail_mock.assert_called_once_with(service, position, 100.0)
         alerts.trailing_stop_updated.assert_awaited_once()
         args = alerts.trailing_stop_updated.await_args.args
         assert args[0] == "BTC"
@@ -885,8 +887,8 @@ class TestRegressionBehavior:
         # The sltp_check function simulates _before_analysis_paper_check:
         # it calls service.close_position() and service.save_account(),
         # then returns the closed order.
-        def sltp_mock(svc, symbol, current_price):
-            svc.close_position(symbol, 90.0, PaperOrderStatus.STOPPED)
+        def sltp_mock(svc, position, current_price):
+            svc.close_position(position.symbol, 90.0, PaperOrderStatus.STOPPED)
             svc.save_account()
             return closed
 

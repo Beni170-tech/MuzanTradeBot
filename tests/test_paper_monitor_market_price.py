@@ -92,20 +92,20 @@ def _monitor(service, price_provider) -> PaperPositionMonitor:
 async def test_fresh_price_is_passed_to_sltp_and_trailing(paper_state):
     """The monitor must hand a fresh market price to both helpers."""
     from telegram_bot.handlers import (
-        _apply_trailing_stop,
-        _before_analysis_paper_check,
+        _apply_trailing_stop_to_position,
+        _paper_position_check,
     )
 
     service, (order,) = _service_with(_make_trade())
     seen: dict[str, float] = {}
 
-    def sltp(svc, symbol, current_price):
+    def sltp(svc, position, current_price):
         seen["sltp"] = current_price
-        return _before_analysis_paper_check(svc, symbol, current_price)
+        return _paper_position_check(svc, position, current_price)
 
-    def trailing(svc, symbol, current_price):
+    def trailing(svc, position, current_price):
         seen["trailing"] = current_price
-        return _apply_trailing_stop(svc, symbol, current_price)
+        return _apply_trailing_stop_to_position(svc, position, current_price)
 
     monitor = PaperPositionMonitor(
         service,

@@ -42,14 +42,14 @@ _TrailingFn = Callable[..., object | None]
 
 
 def _default_sltp_check():
-    """Lazily import the real _before_analysis_paper_check from handlers."""
-    from telegram_bot.handlers import _before_analysis_paper_check as _fn
+    """Lazily import the position-scoped SL/TP check from handlers."""
+    from telegram_bot.handlers import _paper_position_check as _fn
     return _fn
 
 
 def _default_trailing():
-    """Lazily import the real _apply_trailing_stop from handlers."""
-    from telegram_bot.handlers import _apply_trailing_stop as _fn
+    """Lazily import the position-scoped trailing-stop helper."""
+    from telegram_bot.handlers import _apply_trailing_stop_to_position as _fn
     return _fn
 
 
@@ -106,11 +106,13 @@ class PaperPositionMonitor:
             interval_seconds: How long to wait between monitoring
                 cycles. Must be positive.
             sltp_check: Optional override for the SL/TP check function.
-                Defaults to the real ``_before_analysis_paper_check``
-                from the handler layer.
+                It is called as ``sltp_check(service, position, price)``
+                with the exact position being monitored. Defaults to the
+                position-scoped handler helper.
             trailing_fn: Optional override for the trailing-stop function.
-                Defaults to the real ``_apply_trailing_stop`` from the
-                handler layer.
+                It is called as ``trailing_fn(service, position, price)``
+                with the exact position being monitored. Defaults to the
+                position-scoped handler helper.
             price_provider: Optional synchronous callable returning a
                 fresh market price for a symbol, or None when no reliable
                 price is available. It is invoked in a worker thread so a
@@ -418,7 +420,9 @@ class PaperPositionMonitor:
         marked = self._record_mark(position, price)
 
         # 1. Check stop-loss / take-profit first (Guardian Mode priority).
-        closed = self._sltp_check(self._service, symbol, price)
+        #    The exact position is passed, never a symbol lookup: several
+        #    positions may share this symbol.
+        closed = self._sltp_check(self._service, position, price)
         if closed is not None:
             # The helper already saved the account and closed the position.
             # Push the matching alert so the user is notified even when
@@ -435,7 +439,7 @@ class PaperPositionMonitor:
         # 2. Apply trailing stop (if applicable). When it changes the
         #    stop, push an alert.
         trail_changed = False
-        trail_result = self._trailing_fn(self._service, symbol, price)
+        trail_result = self._trailing_fn(self._service, position, price)
         if trail_result is not None:
             changed, old_stop, new_stop = trail_result
             trail_changed = bool(changed)

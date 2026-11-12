@@ -79,6 +79,61 @@ def close_paper_position(
     return broker.close_order(order, exit_price, status, exit_at)
 
 
+def get_open_position_by_id(
+    broker: PaperBroker, order_id: str
+) -> PaperOrder | None:
+    """Return the open position with the exact order id, or None.
+
+    Order ids are compared case-insensitively and must match exactly; no
+    positional fallback is applied, so callers can never accidentally
+    select a different position on the same symbol.
+
+    Args:
+        broker: The PaperBroker that holds the position.
+        order_id: The exact order id to select.
+
+    Returns:
+        The matching open PaperOrder, or None when it is missing.
+    """
+    target = (order_id or "").strip().upper()
+    if not target:
+        return None
+    for order in broker.get_open_positions():
+        if str(order.order_id).strip().upper() == target:
+            return order
+    return None
+
+
+def close_paper_position_by_id(
+    broker: PaperBroker,
+    order_id: str,
+    exit_price: float,
+    status: PaperOrderStatus,
+    exit_at: str | None = None,
+) -> PaperOrder | None:
+    """Close exactly one open paper position, selected by order id.
+
+    Unlike :func:`close_paper_position`, this never falls back to the
+    first position on a symbol. When the id does not identify an open
+    position, nothing is closed and None is returned.
+
+    Args:
+        broker: The PaperBroker that holds the position.
+        order_id: The exact order id of the position to close.
+        exit_price: The price at which the position is closed.
+        status: The terminal status for the closed order.
+        exit_at: Optional timestamp for the exit.
+
+    Returns:
+        The closed PaperOrder, or None when no open position with that
+        order id exists.
+    """
+    order = get_open_position_by_id(broker, order_id)
+    if order is None:
+        return None
+    return broker.close_order(order, exit_price, status, exit_at)
+
+
 def get_open_position(broker: PaperBroker, symbol: str) -> PaperOrder | None:
     """Return the open position for a symbol, or None if none exists.
 

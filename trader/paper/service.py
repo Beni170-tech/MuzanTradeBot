@@ -21,7 +21,9 @@ from trader.paper.broker import PaperBroker
 
 from trader.paper.executor import (
     close_paper_position,
+    close_paper_position_by_id,
     get_open_position,
+    get_open_position_by_id,
     get_paper_summary,
     place_paper_trade,
 )
@@ -205,6 +207,33 @@ class PaperTradingService:
             self._broker, symbol, exit_price, status, exit_at
         )
 
+    def close_position_by_id(
+        self,
+        order_id: str,
+        exit_price: float,
+        status: PaperOrderStatus,
+        exit_at: str | None = None,
+    ) -> PaperOrder | None:
+        """Close exactly one open paper position, selected by order id.
+
+        This is the unambiguous close path: when several positions share
+        a symbol, only the position with this exact order id is closed.
+        An unknown id closes nothing.
+
+        Args:
+            order_id: The exact order id of the position to close.
+            exit_price: The price at which the position is closed.
+            status: The terminal status for the closed order.
+            exit_at: Optional timestamp for the exit.
+
+        Returns:
+            The closed PaperOrder, or None when no open position with
+            that order id exists.
+        """
+        return close_paper_position_by_id(
+            self._broker, order_id, exit_price, status, exit_at
+        )
+
     # ------------------------------------------------------------------
     # Queries
     # ------------------------------------------------------------------
@@ -245,6 +274,10 @@ class PaperTradingService:
     def get_position(self, symbol: str) -> PaperOrder | None:
         """Return the open position for a symbol, or None if none exists.
 
+        When several positions share the symbol this returns the first
+        one. Callers that must act on a specific position (the monitor,
+        manual close) use :meth:`get_position_by_id` instead.
+
         Args:
             symbol: The symbol to look up (case-insensitive).
 
@@ -253,3 +286,14 @@ class PaperTradingService:
             position exists.
         """
         return get_open_position(self._broker, symbol)
+
+    def get_position_by_id(self, order_id: str) -> PaperOrder | None:
+        """Return the open position with the exact order id, or None.
+
+        Args:
+            order_id: The exact order id to look up.
+
+        Returns:
+            The matching open PaperOrder, or None when it is missing.
+        """
+        return get_open_position_by_id(self._broker, order_id)

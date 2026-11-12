@@ -255,10 +255,31 @@ def _format_pnl_label(order: PaperOrder) -> str:
 def _apply_trailing_stop(
     service: PaperTradingService, symbol: str, current_price: float
 ) -> tuple[bool, float | None, float | None] | None:
-    """Apply trailing stop logic to an open paper position.
+    """Apply trailing stop logic to the first open position for a symbol.
 
-    Runs during /analyze using the already-fetched market price.
-    No additional market API calls are made.
+    This is the analysis-flow wrapper around
+    :func:`_apply_trailing_stop_to_position`. The background monitor uses
+    the position-scoped function directly so several positions on one
+    symbol are never confused with each other.
+    """
+    position = service.get_position(symbol)
+    if position is None:
+        return None
+    return _apply_trailing_stop_to_position(
+        service, position, current_price
+    )
+
+
+def _apply_trailing_stop_to_position(
+    service: PaperTradingService,
+    position: PaperOrder,
+    current_price: float,
+) -> tuple[bool, float | None, float | None] | None:
+    """Apply trailing stop logic to one exact open paper position.
+
+    Runs during /analyze and from the background monitor using the
+    already-fetched market price. No additional market API calls are
+    made, and only the supplied position can be modified.
 
     Behavior:
         - For LONG: if price moves above entry by at least 1R
@@ -273,19 +294,18 @@ def _apply_trailing_stop(
 
     Args:
         service: The paper trading service.
-        symbol: The symbol to check.
+        position: The exact open position to evaluate and trail.
         current_price: The current market price from the ongoing
             analysis. Must already be fetched; this function does not
             fetch prices itself.
 
     Returns:
-        None when there is no open position, no valid stop loss, or
+        None when there is no position, no valid stop loss, or
         no trailing action is warranted.
         Otherwise a tuple of (changed, old_stop, new_stop) where
         changed indicates whether the stop was modified and the old/new
         stop values are provided for reporting.
     """
-    position = service.get_position(symbol)
     if position is None:
         return None
 
@@ -411,7 +431,12 @@ def _record_market_mark(position: object, current_price: object) -> bool:
 def _before_analysis_paper_check(
     service: PaperTradingService, symbol: str, current_price: float
 ) -> PaperOrder | None:
-    """Check pre-existing paper positions for SL/TP breach.
+    """Check the first open position for a symbol for SL/TP breach.
+
+    This is the analysis-flow wrapper around
+    :func:`_paper_position_check`. The background monitor uses the
+    position-scoped function directly so it can never close a different
+    position than the one it is processing.
 
     Runs BEFORE any new order is placed for the current analysis.
     Only evaluates positions that existed before this /analyze request.
@@ -423,16 +448,54 @@ def _before_analysis_paper_check(
     existing = service.get_position(symbol)
     if existing is None:
         return None
+    return _paper_position_check(
+        service, existing, current_price, by_id=False, symbol=symbol
+    )
+
+
+def _paper_position_check(
+    service: PaperTradingService,
+    position: PaperOrder,
+    current_price: float,
+    *,
+    by_id: bool = True,
+    symbol: str | None = None,
+) -> PaperOrder | None:
+    """Check one exact open paper position for a stop-loss / take-profit.
+
+    Only ``position`` is marked, evaluated, and (if breached) closed, so
+    other positions on the same symbol are untouched. Stop loss takes
+    priority over take profit (Guardian Mode: protect capital).
+
+    Args:
+        service: The paper trading service.
+        position: The exact position to evaluate.
+        current_price: The already-fetched market price for the symbol.
+        by_id: When True (the monitor path), close the exact order id.
+            When False, keep the analysis flow's historical behaviour of
+            closing by symbol.
+        symbol: Symbol to pass to the symbol-based close path. Defaults
+            to the position's own symbol.
+
+    Returns:
+        The closed order if a closure happened, else None.
+    """
+    if position is None:
+        return None
 
     # Record the analysis price as this position's market mark before any
     # exit decision. The price was already fetched for the analysis, so
     # this adds no blocking network request.
-    _record_market_mark(existing, current_price)
+    _record_market_mark(position, current_price)
 
-    side = existing.side.value.upper() if hasattr(existing.side, "value") else str(existing.side).upper()
+    side = (
+        position.side.value.upper()
+        if hasattr(position.side, "value")
+        else str(position.side).upper()
+    )
 
     # Guard: no valid SL/TP levels configured
-    if existing.stop_loss <= 0 and existing.take_profit <= 0:
+    if position.stop_loss <= 0 and position.take_profit <= 0:
         return None
 
     closed_order: PaperOrder | None = None
@@ -442,28 +505,61 @@ def _before_analysis_paper_check(
     # For SHORT: SL is above entry, TP is below → price must rise to hit SL,
     # drop to hit TP.
     if side == "LONG":
-        sl_hit = existing.stop_loss > 0 and current_price <= existing.stop_loss
-        tp_hit = existing.take_profit > 0 and current_price >= existing.take_profit
+        sl_hit = position.stop_loss > 0 and current_price <= position.stop_loss
+        tp_hit = (
+            position.take_profit > 0 and current_price >= position.take_profit
+        )
     else:
         # SHORT (and any non-LONG side): invert the comparisons
-        sl_hit = existing.stop_loss > 0 and current_price >= existing.stop_loss
-        tp_hit = existing.take_profit > 0 and current_price <= existing.take_profit
+        sl_hit = position.stop_loss > 0 and current_price >= position.stop_loss
+        tp_hit = (
+            position.take_profit > 0 and current_price <= position.take_profit
+        )
 
     if sl_hit:
         # Stop loss hit — close at stop loss price (Guardian Mode priority)
-        closed_order = service.close_position(
-            symbol, existing.stop_loss, PaperOrderStatus.STOPPED
+        closed_order = _close_paper_position_for(
+            service,
+            position,
+            position.stop_loss,
+            PaperOrderStatus.STOPPED,
+            by_id=by_id,
+            symbol=symbol,
         )
     elif tp_hit:
         # Take profit hit — close at take profit price
-        closed_order = service.close_position(
-            symbol, existing.take_profit, PaperOrderStatus.TAKEN_PROFIT
+        closed_order = _close_paper_position_for(
+            service,
+            position,
+            position.take_profit,
+            PaperOrderStatus.TAKEN_PROFIT,
+            by_id=by_id,
+            symbol=symbol,
         )
 
     if closed_order is not None:
         service.save_account(PAPER_STATE_PATH)
 
     return closed_order
+
+
+def _close_paper_position_for(
+    service: PaperTradingService,
+    position: PaperOrder,
+    exit_price: float,
+    status: PaperOrderStatus,
+    *,
+    by_id: bool,
+    symbol: str | None = None,
+) -> PaperOrder | None:
+    """Close either the exact order id or the first position by symbol."""
+    if by_id:
+        return service.close_position_by_id(
+            position.order_id, exit_price, status
+        )
+    return service.close_position(
+        symbol or position.symbol, exit_price, status
+    )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -505,7 +601,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/paper - Show paper account summary\n"
         "/positions - Show open paper positions\n"
         "/history - Show closed paper trades\n"
-        "/close <SYMBOL> <EXIT_PRICE> - Close a paper position\n"
+        "/close <SYMBOL> <EXIT_PRICE> [ORDER_ID] - Close a paper position\n"
+        "  (ORDER_ID is required when several positions share a symbol)\n"
         "/stats - Show paper trading performance dashboard"
     )
     await update.message.reply_text(message)
@@ -984,10 +1081,32 @@ async def history_command(
     await update.message.reply_text(message)
 
 
+def _position_choice_line(position: PaperOrder) -> str:
+    """Format one open position for a disambiguation list."""
+    side = (
+        position.side.value
+        if hasattr(position.side, "value")
+        else str(position.side)
+    )
+    return (
+        f"  • {position.order_id} — {side} qty {position.quantity} "
+        f"entry ${position.entry_price:.2f} "
+        f"(SL ${position.stop_loss:.2f} / TP ${position.take_profit:.2f})"
+    )
+
+
 async def close_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Close an open paper position. Usage: /close <SYMBOL> <EXIT_PRICE>"""
+    """Close one open paper position.
+
+    Usage: /close <SYMBOL> <EXIT_PRICE> [ORDER_ID]
+
+    A single open position for the symbol can be closed without an id,
+    preserving the original behaviour. When several positions share the
+    symbol, nothing is closed until the exact order id is supplied, so a
+    manual close can never hit the wrong position or close them all.
+    """
     if not check_rate_limit(update.effective_chat.id, _rate_limit_config):
         await update.message.reply_text(
             "⏳ Too many requests. Please wait a moment before trying again."
@@ -996,12 +1115,15 @@ async def close_command(
 
     if len(context.args) < 2:
         await update.message.reply_text(
-            "❌ Usage: /close <SYMBOL> <EXIT_PRICE>\n\n"
-            "Example: /close BTC 110.00"
+            "❌ Usage: /close <SYMBOL> <EXIT_PRICE> [ORDER_ID]\n\n"
+            "Examples:\n"
+            "/close BTC 110.00\n"
+            "/close BTC 110.00 <ORDER_ID>  (required when several "
+            "positions share a symbol)"
         )
         return
 
-    symbol = context.args[0].upper()
+    symbol = context.args[0].strip().upper()
     try:
         exit_price = float(context.args[1])
     except ValueError:
@@ -1011,14 +1133,67 @@ async def close_command(
         )
         return
 
+    order_id = (
+        context.args[2].strip() if len(context.args) > 2 else None
+    )
+
     service = _get_paper_service()
-    order = service.close_position(
-        symbol, exit_price, PaperOrderStatus.CLOSED_MANUAL
+    symbol_positions = [
+        position
+        for position in service.open_positions()
+        if str(position.symbol).strip().upper() == symbol
+    ]
+
+    if not symbol_positions:
+        await update.message.reply_text(
+            f"❌ No open paper position found for {symbol}."
+        )
+        return
+
+    if order_id is None:
+        if len(symbol_positions) > 1:
+            choices = "\n".join(
+                _position_choice_line(position)
+                for position in symbol_positions
+            )
+            await update.message.reply_text(
+                f"⚠️ Multiple open positions for {symbol} — "
+                "nothing was closed.\n\n"
+                f"{choices}\n\n"
+                "Re-run with the exact position ID:\n"
+                f"/close {symbol} {exit_price:g} <ORDER_ID>"
+            )
+            return
+        target = symbol_positions[0]
+    else:
+        matches = [
+            position
+            for position in symbol_positions
+            if str(position.order_id).strip().upper() == order_id.upper()
+        ]
+        if not matches:
+            choices = "\n".join(
+                _position_choice_line(position)
+                for position in symbol_positions
+            )
+            await update.message.reply_text(
+                f"❌ No open {symbol} position with ID "
+                f"'{order_id}' — nothing was closed.\n\n"
+                f"Available {symbol} position IDs:\n{choices}\n\n"
+                "Re-run with the exact position ID:\n"
+                f"/close {symbol} {exit_price:g} <ORDER_ID>"
+            )
+            return
+        target = matches[0]
+
+    order = service.close_position_by_id(
+        target.order_id, exit_price, PaperOrderStatus.CLOSED_MANUAL
     )
 
     if order is None:
         await update.message.reply_text(
-            f"❌ No open paper position found for {symbol}."
+            f"❌ Could not close {symbol} position "
+            f"'{target.order_id}' — nothing was closed."
         )
         return
 
@@ -1028,6 +1203,7 @@ async def close_command(
     await update.message.reply_text(
         f"✅ Position Closed\n\n"
         f"Symbol: {order.symbol}\n"
+        f"Order ID: {order.order_id}\n"
         f"Side: {order.side.value}\n"
         f"Exit Price: ${order.exit_price:.2f}\n"
         f"Realized PnL: ${order.realized_pnl:.2f} ({_format_pnl_label(order)})\n"
