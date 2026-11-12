@@ -174,12 +174,23 @@ class PaperPositionMonitor:
 
         Cancellation is requested and then awaited, so no pending monitor
         task is left behind for the event loop to destroy.
-        """
-        self._running = False
-        task = self._task
-        self._task = None
 
-        if task is None or task.done():
+        If ``aclose()`` is called without a running loop, or from an event
+        loop other than the task's own, the task cannot be cancelled or
+        awaited here. In that case a warning is logged and ``self._task``
+        is deliberately preserved (and ``is_running`` stays true), so a
+        later ``aclose()`` on the correct loop can still shut it down
+        cleanly.
+        """
+        task = self._task
+
+        if task is None:
+            self._running = False
+            return
+
+        if task.done():
+            self._task = None
+            self._running = False
             return
 
         try:
@@ -187,17 +198,25 @@ class PaperPositionMonitor:
         except RuntimeError:
             logger.warning(
                 "Paper position monitor aclose() requires a running event "
-                "loop; the task was not cancelled or awaited."
+                "loop; the task was not cancelled or awaited and its "
+                "reference is preserved. Call aclose() from the monitor's "
+                "event loop to shut it down."
             )
             return
 
         if task.get_loop() is not running_loop:
             logger.warning(
                 "Paper position monitor task belongs to a different event "
-                "loop; the task was not cancelled or awaited."
+                "loop; the task was not cancelled or awaited and its "
+                "reference is preserved. Call aclose() from the monitor's "
+                "event loop to shut it down."
             )
             return
 
+        # Shutdown can proceed safely on this loop: release the reference
+        # before cancelling so a re-entrant call sees no task to await.
+        self._task = None
+        self._running = False
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         logger.info("Paper position monitor stopped.")

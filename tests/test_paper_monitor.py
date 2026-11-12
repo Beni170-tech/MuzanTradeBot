@@ -612,6 +612,105 @@ class TestAsyncShutdown:
         assert monitor.is_running is False
 
 
+def _run_without_running_loop(coro):
+    """Drive a coroutine with no running event loop.
+
+    The coroutine is expected to return without suspending; a coroutine
+    that tries to await without a running loop would suspend here.
+    """
+    try:
+        coro.send(None)
+    except StopIteration:
+        return
+    coro.close()
+    raise AssertionError(
+        "coroutine suspended without a running event loop; "
+        "expected it to return"
+    )
+
+
+def _cancel_and_close_loop(loop, task):
+    """Cancel a task on its own loop and close the loop without warnings."""
+    task.cancel()
+    loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
+    loop.close()
+
+
+class TestAsyncShutdownWrongLoop:
+
+    def test_aclose_without_running_loop_preserves_task(self, caplog):
+        monitor = PaperPositionMonitor(
+            MagicMock(), _make_alerts(), interval_seconds=10.0
+        )
+        loop = asyncio.new_event_loop()
+        try:
+            task = loop.create_task(asyncio.sleep(30))
+            monitor._running = True
+            monitor._task = task
+
+            with caplog.at_level(
+                logging.WARNING, logger="trader.paper.monitor"
+            ):
+                _run_without_running_loop(monitor.aclose())
+
+            assert monitor._task is task
+            assert monitor.is_running is True
+            assert not task.done()
+            assert "requires a running event loop" in caplog.text
+            assert "reference is preserved" in caplog.text
+        finally:
+            _cancel_and_close_loop(loop, monitor._task)
+
+    def test_aclose_from_wrong_event_loop_preserves_task(self, caplog):
+        monitor = PaperPositionMonitor(
+            MagicMock(), _make_alerts(), interval_seconds=10.0
+        )
+        other_loop = asyncio.new_event_loop()
+        try:
+            task = other_loop.create_task(asyncio.sleep(30))
+            monitor._running = True
+            monitor._task = task
+
+            with caplog.at_level(
+                logging.WARNING, logger="trader.paper.monitor"
+            ):
+                # Run aclose() on a different loop than the task's own.
+                asyncio.run(monitor.aclose())
+
+            assert monitor._task is task
+            assert monitor.is_running is True
+            assert not task.done()
+            assert "different event loop" in caplog.text
+            assert "reference is preserved" in caplog.text
+        finally:
+            _cancel_and_close_loop(other_loop, monitor._task)
+
+    def test_aclose_on_correct_loop_after_preserved_attempt(self):
+        """A task preserved by a wrong-loop call is shut down later."""
+        monitor = PaperPositionMonitor(
+            MagicMock(), _make_alerts(), interval_seconds=10.0
+        )
+        loop = asyncio.new_event_loop()
+        try:
+            task = loop.create_task(asyncio.sleep(30))
+            monitor._running = True
+            monitor._task = task
+
+            asyncio.run(monitor.aclose())
+            assert monitor._task is task
+
+            loop.run_until_complete(monitor.aclose())
+
+            assert monitor._task is None
+            assert monitor.is_running is False
+            assert task.done()
+        finally:
+            if monitor._task is not None:
+                _cancel_and_close_loop(loop, monitor._task)
+            else:
+                loop.close()
+
+
 # ---------------------------------------------------------------------------
 # Telegram application still starts normally
 # ---------------------------------------------------------------------------
