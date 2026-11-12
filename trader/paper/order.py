@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
+from trader.paper.rules import is_valid_exit_price
 from trader.trade import Trade
 
 
@@ -164,14 +165,25 @@ class PaperOrder:
               ``status`` on this order.
 
         Args:
-            exit_price: The price at which the position was closed.
+            exit_price: The price at which the position was closed. Must
+                be a finite, strictly positive number.
             status: The terminal status for this order (e.g.
                 ``PaperOrderStatus.TAKEN_PROFIT``,
                 ``PaperOrderStatus.STOPPED``, or
                 ``PaperOrderStatus.CLOSED_MANUAL``).
             exit_at: ISO-style timestamp for the exit. When ``None``,
                 the current time is used.
+
+        Raises:
+            ValueError: If ``exit_price`` is not a finite, strictly
+                positive number. Nothing is changed in that case.
         """
+        if not is_valid_exit_price(exit_price):
+            raise ValueError(
+                "exit_price must be a finite, strictly positive number, "
+                f"got {exit_price!r}."
+            )
+
         self.exit_price = float(exit_price)
         self.status = status
         self.exit_at = exit_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")

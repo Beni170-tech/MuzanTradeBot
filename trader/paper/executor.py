@@ -12,7 +12,7 @@ from trader.paper.account import PaperAccount
 from trader.paper.broker import PaperBroker
 from trader.paper.order import PaperOrder, PaperOrderStatus
 from trader.paper.summary import PaperAccountSummary
-from trader.paper.rules import validate_paper_trade
+from trader.paper.rules import is_valid_exit_price, validate_paper_trade
 from trader.trade import Trade
 
 
@@ -60,7 +60,9 @@ def close_paper_position(
     Args:
         broker: The PaperBroker that holds the position.
         symbol: The symbol to close (case-insensitive).
-        exit_price: The price at which the position is closed.
+        exit_price: The price at which the position is closed. Must be a
+            finite, strictly positive number; anything else closes
+            nothing.
         status: The terminal status for the closed order (e.g.
             PaperOrderStatus.TAKEN_PROFIT, PaperOrderStatus.STOPPED,
             PaperOrderStatus.CLOSED_MANUAL). Must be provided explicitly.
@@ -69,8 +71,12 @@ def close_paper_position(
 
     Returns:
         The closed PaperOrder on success, or None when no open position
-        exists for the symbol.
+        exists for the symbol or ``exit_price`` is not a finite, strictly
+        positive number. Nothing is changed when the price is rejected.
     """
+    if not is_valid_exit_price(exit_price):
+        return None
+
     open_positions = broker.get_open_positions_by_symbol(symbol)
     if not open_positions:
         return None
@@ -120,14 +126,20 @@ def close_paper_position_by_id(
     Args:
         broker: The PaperBroker that holds the position.
         order_id: The exact order id of the position to close.
-        exit_price: The price at which the position is closed.
+        exit_price: The price at which the position is closed. Must be a
+            finite, strictly positive number; anything else closes
+            nothing.
         status: The terminal status for the closed order.
         exit_at: Optional timestamp for the exit.
 
     Returns:
         The closed PaperOrder, or None when no open position with that
-        order id exists.
+        order id exists, or when ``exit_price`` is not a finite, strictly
+        positive number. Nothing is changed when the price is rejected.
     """
+    if not is_valid_exit_price(exit_price):
+        return None
+
     order = get_open_position_by_id(broker, order_id)
     if order is None:
         return None

@@ -23,6 +23,7 @@ from trader.paper.storage import load_account as storage_load_account
 from trader.paper.storage import save_account as storage_save_account
 from trader.paper.order import PaperOrder, PaperOrderStatus
 from trader.paper.order import paper_exit_status, paper_exit_date
+from trader.paper.rules import is_valid_exit_price
 from trader.paper.analytics import (
     OverallPerformance,
     RiskMetrics,
@@ -1191,6 +1192,16 @@ async def close_command(
         await update.message.reply_text(
             f"❌ Invalid exit price: '{context.args[1]}'. "
             "Please provide a valid number."
+        )
+        return
+
+    # Reject unusable prices before touching positions, balances, storage
+    # or alerts. The lower-level close path enforces the same rule, so a
+    # direct caller cannot bypass it either.
+    if not is_valid_exit_price(exit_price):
+        await update.message.reply_text(
+            f"❌ Invalid exit price: '{context.args[1]}'. "
+            "Exit price must be a finite number greater than 0."
         )
         return
 

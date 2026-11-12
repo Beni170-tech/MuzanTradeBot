@@ -107,6 +107,13 @@ bot closes nothing and replies with each position's order ID; re-run
 position. An unknown or mismatched ID closes nothing, and a manual
 close never closes more than one position.
 
+The exit price must be a finite number greater than 0. Zero,
+negatives, NaN, infinity, booleans and non-numeric input are rejected
+before anything is looked up or changed: the position stays open and
+the account balance, realized P&L, saved state and alerts are left
+untouched. The same rule is enforced by the broker, order and executor
+close functions, so a direct caller cannot bypass it.
+
 ### Stale market marks
 
 Every recorded mark also stores a UTC timestamp (`mark_at`). Before a

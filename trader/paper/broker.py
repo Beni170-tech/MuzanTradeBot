@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 from trader.execution.contract import ExecutionBackend
 from trader.paper.account import PaperAccount
 from trader.paper.order import PaperOrder, PaperOrderSide, PaperOrderStatus
-from trader.paper.rules import validate_paper_trade
+from trader.paper.rules import is_valid_exit_price, validate_paper_trade
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -200,8 +200,17 @@ class PaperBroker(ExecutionBackend):
             The closed PaperOrder with exit details populated.
 
         Raises:
-            ValueError: If order is not currently open.
+            ValueError: If exit_price is not a finite, strictly positive
+                number, or if order is not currently open. Validation
+                happens before any state changes, so a rejected close
+                leaves the order and account untouched.
         """
+        if not is_valid_exit_price(exit_price):
+            raise ValueError(
+                "exit_price must be a finite, strictly positive number, "
+                f"got {exit_price!r}."
+            )
+
         if not order.is_open():
             raise ValueError(
                 f"Order {order.order_id!r} is not open (status={order.status.value})."

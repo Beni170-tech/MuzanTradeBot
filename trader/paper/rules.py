@@ -7,6 +7,7 @@ and no Telegram notifications.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -26,6 +27,31 @@ class PaperRuleResult:
 
     ok: bool
     reason: str
+
+
+def is_valid_exit_price(exit_price: object) -> bool:
+    """Return True only for a usable paper exit price.
+
+    A usable exit price is a finite, strictly positive number. Booleans
+    are rejected even though ``bool`` subclasses ``int``, as are strings,
+    ``None``, NaN, and either infinity. The check is pure and performs no
+    side effects.
+
+    Args:
+        exit_price: The candidate exit price.
+
+    Returns:
+        True when the price can safely settle a paper position.
+    """
+    if isinstance(exit_price, bool):
+        return False
+    if not isinstance(exit_price, (int, float)):
+        return False
+    try:
+        value = float(exit_price)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return math.isfinite(value) and value > 0
 
 
 def validate_paper_trade(
