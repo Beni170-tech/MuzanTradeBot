@@ -45,3 +45,29 @@ application's `post_shutdown` hook while the event loop is still open.
 
 All monitoring actions remain simulated paper-trading operations. No live
 orders are placed.
+
+## Paper Position Marks, Equity and the Open-Position Cap
+
+Open paper positions record a market mark (`mark_price`), the last
+validated market price seen for that position:
+
+- The background monitor records the fresh price it already fetched for
+  the exact position it is checking, and persists the paper account.
+- `/analyze` records the analysis price for an existing position in the
+  same symbol. No extra market request is made.
+- Unrealized PnL and paper equity are valued at the recorded marks, for
+  LONG and SHORT positions. A position without a mark contributes 0.0;
+  the entry price is never substituted, so a missing mark can never look
+  like a flat position. Marks are saved in the paper account JSON.
+- Telegram command handlers never fetch prices, so `/paper`,
+  `/positions` and `/stats` label marked values as "last recorded
+  marks" and report missing marks as "unavailable (no market mark
+  recorded yet)" instead of a misleading `$0.00`.
+
+`PORTFOLIO_MAX_OPEN_POSITIONS` counts open paper positions through the
+active execution backend (`PaperBroker.get_open_positions()`), so the
+configured portfolio-wide cap blocks new paper trades once the limit is
+reached. The count and cap are also reported by `/stats`.
+
+Position sizing still uses the configured `ACCOUNT_BALANCE`; account
+equity does not feed position sizing yet.

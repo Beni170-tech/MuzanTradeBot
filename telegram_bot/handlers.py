@@ -4,6 +4,7 @@ All user-facing command logic lives here.
 """
 
 import logging
+import math
 from datetime import datetime
 from pathlib import Path
 
@@ -283,6 +284,30 @@ def _mark_trail_active(position: object) -> None:
         notes.append("trailing_active")
 
 
+def _record_market_mark(position: object, current_price: object) -> bool:
+    """Record a validated current market price on a paper position.
+
+    The price handed in already comes from the analysis flow, so this
+    adds no network request. The position's own mark mechanism rejects
+    unusable values, and objects without it (test doubles, legacy
+    shapes) are left untouched.
+
+    Args:
+        position: The open paper position to mark.
+        current_price: The current market price from the analysis flow.
+
+    Returns:
+        True when the mark was recorded, False otherwise.
+    """
+    marker = getattr(position, "mark_to_market", None)
+    if not callable(marker):
+        return False
+    try:
+        return bool(marker(current_price))
+    except (TypeError, ValueError):
+        return False
+
+
 def _before_analysis_paper_check(
     service: PaperTradingService, symbol: str, current_price: float
 ) -> PaperOrder | None:
@@ -298,6 +323,11 @@ def _before_analysis_paper_check(
     existing = service.get_position(symbol)
     if existing is None:
         return None
+
+    # Record the analysis price as this position's market mark before any
+    # exit decision. The price was already fetched for the analysis, so
+    # this adds no blocking network request.
+    _record_market_mark(existing, current_price)
 
     side = existing.side.value.upper() if hasattr(existing.side, "value") else str(existing.side).upper()
 
@@ -748,22 +778,21 @@ async def paper_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     message = (
         f"📄 Paper Account Summary\n\n"
         f"Balance: ${summary.current_balance:.2f}\n"
-        f"Equity: ${summary.equity:.2f}\n"
+        f"{_equity_display(summary, open_positions)}\n"
         f"Open Positions: {len(open_positions)}\n"
         f"Closed Positions: {summary.closed_count}\n"
         f"Realized PnL: ${summary.total_realized_pnl:.2f}\n"
-        f"Unrealized PnL: ${summary.open_pnl:.2f}"
+        f"{_unrealized_pnl_display(summary, open_positions)}"
     )
 
     if open_positions:
         message += "\n\n📌 Open Positions:\n"
         for pos in open_positions:
-            unrealized = pos.unrealized_pnl_for(pos.entry_price)
             message += (
                 f"\n  {pos.symbol} {pos.side.value}\n"
                 f"  Entry: ${pos.entry_price:.2f}\n"
                 f"  Qty: {pos.quantity}\n"
-                f"  Unrealized PnL: ${unrealized:.2f}"
+                f"  {_position_mark_display(pos)}"
             )
 
     if closed_positions:
@@ -797,12 +826,11 @@ async def positions_command(
 
     message = "📌 Open Paper Positions:\n\n"
     for pos in open_positions:
-        unrealized = pos.unrealized_pnl_for(pos.entry_price)
         message += (
             f"{pos.symbol} {pos.side.value}\n"
             f"  Entry: ${pos.entry_price:.2f}\n"
             f"  Qty: {pos.quantity}\n"
-            f"  Unrealized PnL: ${unrealized:.2f}\n\n"
+            f"  {_position_mark_display(pos)}\n\n"
         )
 
     await update.message.reply_text(message)
@@ -926,6 +954,83 @@ def _format_infnan(value: float | None) -> str:
     return f"{value:.2f}"
 
 
+def _recorded_mark(pos) -> float | None:
+    """Return the position's usable recorded market mark, or None.
+
+    Only a finite, strictly positive number counts as a mark. Anything
+    else (missing, None, or an unexpected value) is treated as "no mark
+    recorded yet" so displays can never invent a valuation.
+    """
+    mark = getattr(pos, "mark_price", None)
+    if isinstance(mark, bool) or not isinstance(mark, (int, float)):
+        return None
+    if not math.isfinite(mark) or mark <= 0:
+        return None
+    return float(mark)
+
+
+def _positions_with_marks(open_positions) -> list:
+    """Return the open positions that carry a recorded market mark."""
+    return [pos for pos in open_positions if _recorded_mark(pos) is not None]
+
+
+def _equity_display(summary, open_positions) -> str:
+    """Return the equity line, labelled by how fresh its valuation is.
+
+    Equity only includes unrealized PnL for positions with a recorded
+    market mark. Command handlers do not fetch prices, so marked equity
+    is presented as based on last recorded marks rather than live
+    prices, and unmarked positions are called out explicitly.
+    """
+    if not open_positions:
+        return f"Equity: ${summary.equity:.2f}"
+
+    marked = _positions_with_marks(open_positions)
+    if not marked:
+        return (
+            f"Equity: ${summary.equity:.2f} "
+            "(settled balance; no market marks recorded yet)"
+        )
+
+    line = (
+        f"Equity: ${summary.equity:.2f} "
+        "(based on last recorded marks, not live prices)"
+    )
+    missing = len(open_positions) - len(marked)
+    if missing:
+        line += f" — {missing} position(s) without a mark excluded"
+    return line
+
+
+def _unrealized_pnl_display(
+    summary, open_positions, label: str = "Unrealized PnL"
+) -> str:
+    """Return the unrealized PnL line without faking missing marks."""
+    if not open_positions:
+        return f"{label}: ${summary.open_pnl:.2f}"
+
+    marked = _positions_with_marks(open_positions)
+    if not marked:
+        return f"{label}: unavailable (no market mark recorded yet)"
+
+    line = f"{label}: ${summary.open_pnl:.2f} (last recorded marks)"
+    missing = len(open_positions) - len(marked)
+    if missing:
+        line += f" — {missing} position(s) without a mark excluded"
+    return line
+
+
+def _position_mark_display(pos) -> str:
+    """Return the per-position mark/PnL lines for open position displays."""
+    mark = _recorded_mark(pos)
+    if mark is None:
+        return "Unrealized PnL: unavailable (no market mark recorded yet)"
+    return (
+        f"Mark: ${mark:,.2f} (last recorded)\n"
+        f"  Unrealized PnL: ${pos.unrealized_pnl_for(mark):,.2f}"
+    )
+
+
 def trade_risk_value(trade) -> float:
     """Compute the dollar risk of a trade (for display in risk limit messages).
 
@@ -971,7 +1076,7 @@ async def stats_command(
         f"Initial: ${summary.initial_balance:,.2f}\n"
         f"Return: {return_str}\n"
         f"Open Positions: {len(open_positions)}\n"
-        f"Open PnL: {_format_pnl_value(summary.open_pnl)}\n"
+        f"{_unrealized_pnl_display(summary, open_positions, label='Open PnL')}\n"
     )
 
     if not closed_positions:

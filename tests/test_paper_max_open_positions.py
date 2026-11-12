@@ -473,3 +473,215 @@ def test_max_open_positions_stats_section_at_limit(monkeypatch) -> None:
     assert "Capacity Used: 100.0%" in called_text
     assert "Remaining: 0" in called_text
     assert "Status: at limit" in called_text
+
+
+# ---------------------------------------------------------------------------
+# Real execution backend integration (Task 3, Part 1)
+# ---------------------------------------------------------------------------
+
+def _real_trade(
+    symbol: str = "BTC",
+    price: float = 100.0,
+    quantity: float = 1.0,
+    side: str = "LONG",
+):
+    """Build a real approved Trade for placement through the real broker."""
+    from trader.trade import Trade
+
+    return Trade(
+        symbol=symbol,
+        price=price,
+        trend="Bullish" if side == "LONG" else "Bearish",
+        signal="BUY" if side == "LONG" else "SELL",
+        confidence=80,
+        decision="BUY" if side == "LONG" else "SELL",
+        risk_verdict="APPROVED",
+        position_size=quantity,
+        stop_loss=price * 0.95,
+        take_profit=price * 1.05,
+        side=side,
+        approved=True,
+        risk_reasons=[],
+        timestamp="2026-01-01 00:00:00",
+    )
+
+
+def _real_service_with(*trades):
+    """Create a real PaperTradingService holding the given open positions."""
+    from trader.paper.service import PaperTradingService
+
+    service = PaperTradingService.create_new_account(1000.0)
+    for trade in trades:
+        assert service.place_trade(trade) is not None
+    return service
+
+
+def test_manager_counts_real_paper_broker_positions() -> None:
+    service = _real_service_with(
+        _real_trade("BTC", 100.0),
+        _real_trade("ETH", 2000.0),
+    )
+    mgr = MaxOpenPositionsManager(service.execution_backend(), 5)
+
+    result = mgr.evaluate()
+
+    assert result.current_open_positions == 2
+    assert result.allowed is True
+    assert result.remaining == 3
+
+
+def test_manager_blocks_real_paper_broker_at_limit() -> None:
+    service = _real_service_with(
+        _real_trade("BTC", 100.0),
+        _real_trade("ETH", 2000.0),
+    )
+    mgr = MaxOpenPositionsManager(service.execution_backend(), 2)
+
+    result = mgr.evaluate()
+
+    assert result.allowed is False
+    assert result.current_open_positions == 2
+    assert result.reason == (
+        "portfolio already has the maximum number of open positions"
+    )
+
+
+def test_manager_metrics_use_real_paper_broker() -> None:
+    service = _real_service_with(
+        _real_trade("BTC", 100.0),
+        _real_trade("ETH", 2000.0),
+    )
+    mgr = MaxOpenPositionsManager(service.execution_backend(), 5)
+
+    m = mgr.metrics()
+
+    assert m.enabled is True
+    assert m.current_open_positions == 2
+    assert m.usage_percent == 40.0
+    assert m.remaining == 3
+    assert m.status == "ok"
+
+
+def test_manager_counts_nothing_for_reloaded_empty_account() -> None:
+    from trader.paper.service import PaperTradingService
+
+    service = PaperTradingService.create_new_account(1000.0)
+    mgr = MaxOpenPositionsManager(service.execution_backend(), 2)
+
+    assert mgr.evaluate().current_open_positions == 0
+    assert mgr.metrics().current_open_positions == 0
+
+
+def test_manager_accepts_paper_account_directly() -> None:
+    service = _real_service_with(_real_trade("BTC", 100.0))
+
+    result = MaxOpenPositionsManager(service._account, 2).evaluate()
+
+    assert result.current_open_positions == 1
+    assert result.allowed is True
+
+
+def _run_analyze_with_real_service(
+    monkeypatch,
+    tmp_path,
+    *,
+    service,
+    new_trade,
+    limit: int,
+):
+    """Run /analyze end-to-end against a real paper service and broker."""
+    from config import settings as cfg_settings
+    import telegram_bot.handlers as h
+
+    names = (
+        "PAPER_TRADING",
+        "PORTFOLIO_MAX_OPEN_POSITIONS",
+        "PORTFOLIO_DAILY_LOSS_LIMIT",
+        "PORTFOLIO_RISK_LIMIT",
+        "PORTFOLIO_EXPOSURE_LIMIT",
+        "PORTFOLIO_MAX_POSITIONS_PER_SYMBOL",
+        "PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL",
+        "ALERTS_ENABLED",
+    )
+    originals = {name: getattr(cfg_settings.settings, name) for name in names}
+    try:
+        cfg_settings.settings.PAPER_TRADING = True
+        cfg_settings.settings.PORTFOLIO_MAX_OPEN_POSITIONS = limit
+        cfg_settings.settings.PORTFOLIO_DAILY_LOSS_LIMIT = 0.0
+        cfg_settings.settings.PORTFOLIO_RISK_LIMIT = 0.0
+        cfg_settings.settings.PORTFOLIO_EXPOSURE_LIMIT = 0.0
+        cfg_settings.settings.PORTFOLIO_MAX_POSITIONS_PER_SYMBOL = 0
+        cfg_settings.settings.PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL = 0.0
+        cfg_settings.settings.ALERTS_ENABLED = False
+
+        monkeypatch.setattr(h, "check_rate_limit", lambda *a, **k: True)
+        monkeypatch.setattr(
+            h,
+            "analyze_coin",
+            lambda _: {"symbol": new_trade.symbol, "price": new_trade.price},
+        )
+        monkeypatch.setattr(h, "make_decision", lambda r: MagicMock(approved=True))
+        monkeypatch.setattr(
+            h, "validate_trade", lambda d, r, p: MagicMock(approved=True)
+        )
+        monkeypatch.setattr(h, "build_trade", lambda r, v, p: new_trade)
+        monkeypatch.setattr(h, "log_trade", MagicMock())
+        monkeypatch.setattr(h, "_get_paper_service", lambda: service)
+        monkeypatch.setattr(h, "PAPER_STATE_PATH", tmp_path / "paper_state.json")
+
+        update = MagicMock()
+        update.message.reply_text = AsyncMock()
+        update.message.chat.id = 123
+        asyncio.run(h.analyze(update, MagicMock()))
+        return update.message.reply_text.await_args_list
+    finally:
+        for name, value in originals.items():
+            setattr(cfg_settings.settings, name, value)
+
+
+def test_analyze_blocks_new_trade_at_limit_with_real_service(
+    monkeypatch, tmp_path
+) -> None:
+    service = _real_service_with(
+        _real_trade("BTC", 100.0),
+        _real_trade("ETH", 2000.0),
+    )
+
+    replies = _run_analyze_with_real_service(
+        monkeypatch,
+        tmp_path,
+        service=service,
+        new_trade=_real_trade("SOL", 50.0),
+        limit=2,
+    )
+    text = "\n".join(reply[0][0] for reply in replies)
+
+    assert "Maximum Open Positions Reached" in text
+    assert "Current Open Positions: 2" in text
+    assert "Max Open Positions: 2" in text
+    assert "The trade was not placed." in text
+    assert "Paper Order: PLACED" not in text
+    assert len(service.open_positions()) == 2
+
+
+def test_analyze_places_trade_under_limit_with_real_service(
+    monkeypatch, tmp_path
+) -> None:
+    service = _real_service_with(
+        _real_trade("BTC", 100.0),
+        _real_trade("ETH", 2000.0),
+    )
+
+    replies = _run_analyze_with_real_service(
+        monkeypatch,
+        tmp_path,
+        service=service,
+        new_trade=_real_trade("SOL", 50.0),
+        limit=3,
+    )
+    text = "\n".join(reply[0][0] for reply in replies)
+
+    assert "Maximum Open Positions Reached" not in text
+    assert "Paper Order: PLACED" in text
+    assert len(service.open_positions()) == 3
+    assert service.get_position("SOL") is not None

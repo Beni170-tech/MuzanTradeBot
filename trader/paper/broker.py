@@ -268,11 +268,22 @@ class PaperBroker(ExecutionBackend):
     def get_open_pnl(self) -> float:
         """Return the sum of unrealized PnL across all open positions.
 
+        Each position is valued at its last recorded market mark. A
+        position that has no recorded mark contributes 0.0; the entry
+        price is never substituted, because that would fake a flat
+        position and hide real floating profit or loss.
+
         Returns:
             Total unrealized profit (positive) or loss (negative) across
-            currently open positions.
+            currently open positions at their recorded marks.
         """
-        return sum(p.unrealized_pnl_for(p.entry_price) for p in self._account.open_positions)
+        total = 0.0
+        for position in self._account.open_positions:
+            mark = getattr(position, "mark_price", None)
+            if mark is None:
+                continue
+            total += position.unrealized_pnl_for(mark)
+        return total
 
     def get_initial_balance(self) -> float:
         """Return the starting balance of the broker's account.
@@ -303,7 +314,9 @@ class PaperBroker(ExecutionBackend):
         """Return the broker account's current equity.
 
         Returns:
-            The settled balance plus unrealized PnL across open positions.
+            The settled balance plus unrealized PnL across open positions
+            at their last recorded market marks (unmarked positions
+            contribute 0.0).
         """
         return self._account.equity()
 

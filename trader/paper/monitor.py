@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from market.analyzer import get_current_price
@@ -50,6 +51,12 @@ def _default_trailing():
     """Lazily import the real _apply_trailing_stop from handlers."""
     from telegram_bot.handlers import _apply_trailing_stop as _fn
     return _fn
+
+
+def _default_state_path():
+    """Lazily import the handler layer's paper state path."""
+    from telegram_bot.handlers import PAPER_STATE_PATH as _path
+    return _path
 
 
 class PaperPositionMonitor:
@@ -87,6 +94,7 @@ class PaperPositionMonitor:
         sltp_check: _SltpCheckFn | None = None,
         trailing_fn: _TrailingFn | None = None,
         price_provider: Callable[[str], float | None] | None = None,
+        state_path: str | Path | None = None,
     ) -> None:
         """Initialize the monitor.
 
@@ -108,6 +116,10 @@ class PaperPositionMonitor:
                 price is available. It is invoked in a worker thread so a
                 slow lookup never blocks the event loop. Defaults to
                 :func:`market.analyzer.get_current_price`.
+            state_path: Optional path used to persist recorded market
+                marks. Defaults to the handler layer's
+                ``PAPER_STATE_PATH``, resolved lazily so the monitor and
+                the command handlers always share one state file.
         """
         if interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")
@@ -123,6 +135,9 @@ class PaperPositionMonitor:
         # Market price source. The default reuses the existing CoinGecko
         # integration; tests inject a deterministic provider.
         self._price_provider = price_provider or get_current_price
+
+        # Where recorded market marks are persisted.
+        self._state_path = state_path
 
         self._task: asyncio.Task[None] | None = None
         self._running = False
@@ -397,6 +412,11 @@ class PaperPositionMonitor:
             )
             return
 
+        # Record the validated market price on this exact position before
+        # any exit decision, so equity/unrealized PnL use a real mark
+        # instead of the entry price.
+        marked = self._record_mark(position, price)
+
         # 1. Check stop-loss / take-profit first (Guardian Mode priority).
         closed = self._sltp_check(self._service, symbol, price)
         if closed is not None:
@@ -414,13 +434,64 @@ class PaperPositionMonitor:
 
         # 2. Apply trailing stop (if applicable). When it changes the
         #    stop, push an alert.
+        trail_changed = False
         trail_result = self._trailing_fn(self._service, symbol, price)
         if trail_result is not None:
             changed, old_stop, new_stop = trail_result
+            trail_changed = bool(changed)
             if changed:
                 await self._alerts.trailing_stop_updated(
                     symbol, old_stop, new_stop
                 )
+
+        # Persist the recorded mark so it survives restarts. A trailing-stop
+        # change (or an SL/TP close above) already saved the account.
+        if marked and not trail_changed:
+            self._persist_marks()
+
+    # ------------------------------------------------------------------
+    # Market-mark recording
+    # ------------------------------------------------------------------
+
+    def _record_mark(self, position: "PaperOrder", price: float) -> bool:
+        """Record ``price`` as the market mark for this exact position.
+
+        Only real :class:`PaperOrder` instances are marked; test doubles
+        and look-alike objects are left untouched, which keeps the monitor
+        from writing state for things that are not positions.
+
+        Args:
+            position: The open position being monitored.
+            price: The validated market price for this position's symbol.
+
+        Returns:
+            True when the mark was recorded and changed the position.
+        """
+        from trader.paper.order import PaperOrder
+
+        if not isinstance(position, PaperOrder):
+            return False
+        return position.mark_to_market(price)
+
+    def _persist_marks(self) -> None:
+        """Persist the account so recorded marks survive a restart.
+
+        A persistence failure must not break monitoring, so it is logged
+        and swallowed; the next cycle retries with a fresh mark.
+        """
+        try:
+            path = (
+                self._state_path
+                if self._state_path is not None
+                else _default_state_path()
+            )
+            self._service.save_account(path)
+        except Exception:
+            logger.warning(
+                "Failed to persist paper market marks; they will be "
+                "re-recorded on the next monitoring cycle.",
+                exc_info=True,
+            )
 
     # ------------------------------------------------------------------
     # Monitoring without alerts (for tests that do not wire alerts)

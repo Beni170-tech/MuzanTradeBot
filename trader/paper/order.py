@@ -13,6 +13,7 @@ Sprint 5D scope:
 - Exit recording helper for the broker close path.
 """
 
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -75,6 +76,10 @@ class PaperOrder:
     exit_price: Optional[float] = None
     realized_pnl: float = 0.0
     unrealized_pnl: float = 0.0
+    # Last validated market price recorded for this position. ``None`` means
+    # no market mark has been recorded yet; the entry price is never used as
+    # a substitute, so an unmarked position contributes 0.0 unrealized PnL.
+    mark_price: Optional[float] = None
     paper: bool = True
     notes: list[str] = field(default_factory=list)
 
@@ -96,10 +101,41 @@ class PaperOrder:
         """
         if self.quantity <= 0 or self.entry_price <= 0:
             return 0.0
+        if isinstance(current_price, bool) or not isinstance(
+            current_price, (int, float)
+        ):
+            return 0.0
+        if not math.isfinite(current_price) or current_price <= 0:
+            return 0.0
         price_diff = current_price - self.entry_price
         if self.side == PaperOrderSide.SHORT:
             price_diff = -price_diff
         return price_diff * self.quantity
+
+    def mark_to_market(self, current_price: float) -> bool:
+        """Record a validated market price and refresh unrealized PnL.
+
+        Only a finite, strictly positive number is accepted. A rejected
+        value leaves any previously recorded mark untouched, so a bad
+        market read can never overwrite a good mark with nonsense.
+
+        Args:
+            current_price: The market price to record for this position.
+
+        Returns:
+            True when the mark was recorded, False when the price was not
+            usable and nothing changed.
+        """
+        if isinstance(current_price, bool) or not isinstance(
+            current_price, (int, float)
+        ):
+            return False
+        if not math.isfinite(current_price) or current_price <= 0:
+            return False
+
+        self.mark_price = float(current_price)
+        self.unrealized_pnl = self.unrealized_pnl_for(self.mark_price)
+        return True
 
     def record_exit(
         self,

@@ -136,16 +136,35 @@ class MaxOpenPositionsManager:
     Kept intentionally thin and side-effect free: the real work is done by
     :func:`evaluate` and :func:`metrics`. The manager exists so the handler
     layer can reuse the same shape as the other Sprint 7A-8A risk managers.
+
+    The source is normally an execution backend (``PaperBroker``), which
+    exposes ``get_open_positions()`` rather than an ``open_positions`` list.
+    Reading the broker's contract method is what makes this rule actually
+    enforce the portfolio-wide cap; the attribute form is kept only for
+    backward compatibility with callers that pass a ``PaperAccount``-like
+    object.
     """
 
     def __init__(self, account: Any, limit: int) -> None:
         self._account = account
         self._limit = limit
 
+    def _positions(self) -> Any:
+        """Return the current open positions from the wrapped source.
+
+        Prefers the execution-backend contract (``get_open_positions()``)
+        and falls back to an ``open_positions`` attribute for account-like
+        objects. A backend failure is not swallowed: the handler layer
+        treats a raising gate as "do not place", which fails closed for a
+        capital-protection limit.
+        """
+        getter = getattr(self._account, "get_open_positions", None)
+        if callable(getter):
+            return getter() or []
+        return getattr(self._account, "open_positions", None) or []
+
     def evaluate(self) -> MaxOpenPositionsResult:
-        positions = getattr(self._account, "open_positions", None) or []
-        return evaluate(positions, self._limit)
+        return evaluate(self._positions(), self._limit)
 
     def metrics(self) -> MaxOpenPositionsMetrics:
-        positions = getattr(self._account, "open_positions", None) or []
-        return metrics(positions, self._limit)
+        return metrics(self._positions(), self._limit)

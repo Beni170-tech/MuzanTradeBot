@@ -55,6 +55,7 @@ def _order_to_dict(order: PaperOrder) -> dict[str, Any]:
         "exit_price": order.exit_price,
         "realized_pnl": order.realized_pnl,
         "unrealized_pnl": order.unrealized_pnl,
+        "mark_price": order.mark_price,
         "paper": order.paper,
         "notes": order.notes,
     }
@@ -98,6 +99,7 @@ def _dict_to_order(data: dict[str, Any]) -> PaperOrder:
         exit_price=data.get("exit_price"),
         realized_pnl=data.get("realized_pnl", 0.0),
         unrealized_pnl=data.get("unrealized_pnl", 0.0),
+        mark_price=data.get("mark_price"),
         paper=data.get("paper", True),
         notes=list(data.get("notes", [])),
     )

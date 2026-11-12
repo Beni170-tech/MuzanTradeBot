@@ -115,17 +115,25 @@ class PaperAccount:
         """Compute current account equity.
 
         Equity = current_balance + sum of unrealized PnL across all
-        open positions. Closed positions have already settled into
+        open positions, valued at each position's last recorded market
+        mark. Closed positions have already settled into
         current_balance via :meth:`add_realized_pnl`, so they are not
         counted again here.
 
+        A position without a recorded market mark contributes 0.0. The
+        entry price is never substituted for a missing mark, so equity
+        never implies a floating value that has not actually been
+        observed.
+
         Returns:
-            Total account value including floating unrealized gains/losses.
+            Settled balance plus unrealized PnL at recorded marks.
         """
-        unrealized = sum(
-            position.unrealized_pnl_for(position.entry_price)
-            for position in self.open_positions
-        )
+        unrealized = 0.0
+        for position in self.open_positions:
+            mark = getattr(position, "mark_price", None)
+            if mark is None:
+                continue
+            unrealized += position.unrealized_pnl_for(mark)
         return self.current_balance + unrealized
 
     def add_realized_pnl(self, realized_pnl: float) -> None:
