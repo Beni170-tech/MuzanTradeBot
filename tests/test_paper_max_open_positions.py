@@ -236,8 +236,30 @@ def _make_closed_positions(count: int) -> list:
     ]
 
 
+def _fresh_mark_at() -> str:
+    """Return a current UTC mark timestamp in the stored ISO format."""
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _open_position(symbol: str) -> types.SimpleNamespace:
+    """Build an open-position stand-in with a fresh market mark.
+
+    The /analyze flow now refuses to size a trade unless every open
+    position has a fresh mark, so position-gate fixtures must look like
+    a healthy monitor-refreshed account.
+    """
+    return types.SimpleNamespace(
+        symbol=symbol,
+        entry_price=100.0,
+        mark_price=100.0,
+        mark_at=_fresh_mark_at(),
+    )
+
+
 def _make_open_positions(count: int) -> list:
-    return [{"symbol": f"POS{i}", "side": "LONG"} for i in range(count)]
+    return [_open_position(f"POS{i}") for i in range(count)]
 
 
 def _configure_and_run_analyze(
@@ -331,7 +353,7 @@ def test_max_open_positions_gate_blocks_at_limit(monkeypatch) -> None:
     reply, replies = _configure_and_run_analyze(
         monkeypatch,
         max_open_positions=2,
-        open_positions=[{"symbol": "BTC"}, {"symbol": "ETH"}],
+        open_positions=[_open_position("BTC"), _open_position("ETH")],
         place_trade_return=None,
         fake_trade=fake_trade,
         analyze_coin_return={"symbol": "X", "price": 1.0},
@@ -373,7 +395,7 @@ def test_max_open_positions_gate_allows_when_under_limit(monkeypatch) -> None:
     reply, replies = _configure_and_run_analyze(
         monkeypatch,
         max_open_positions=5,
-        open_positions=[{"symbol": "BTC"}],
+        open_positions=[_open_position("BTC")],
         place_trade_return=placed_order,
         fake_trade=fake_trade,
         analyze_coin_return={"symbol": "X", "price": 1.0},
@@ -639,6 +661,12 @@ def _run_analyze_with_real_service(
             setattr(cfg_settings.settings, name, value)
 
 
+def _mark_all_fresh(service) -> None:
+    """Give every open position a fresh mark at its entry price."""
+    for position in service.open_positions():
+        assert position.mark_to_market(position.entry_price) is True
+
+
 def test_analyze_blocks_new_trade_at_limit_with_real_service(
     monkeypatch, tmp_path
 ) -> None:
@@ -646,6 +674,7 @@ def test_analyze_blocks_new_trade_at_limit_with_real_service(
         _real_trade("BTC", 100.0),
         _real_trade("ETH", 2000.0),
     )
+    _mark_all_fresh(service)
 
     replies = _run_analyze_with_real_service(
         monkeypatch,
@@ -671,6 +700,7 @@ def test_analyze_places_trade_under_limit_with_real_service(
         _real_trade("BTC", 100.0),
         _real_trade("ETH", 2000.0),
     )
+    _mark_all_fresh(service)
 
     replies = _run_analyze_with_real_service(
         monkeypatch,

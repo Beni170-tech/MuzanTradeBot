@@ -273,3 +273,239 @@ def test_analyze_blocks_new_trade_when_equity_cannot_be_read(
     assert "Paper Order: PLACED" not in text
     assert "Account balance must be positive." in text
     service.place_trade.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Stale / missing market marks (safeguard)
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+from trader.paper.mark_freshness import (  # noqa: E402
+    DEFAULT_MAX_MARK_AGE_SECONDS,
+    check_marks_freshness,
+    max_mark_age_seconds,
+)
+
+
+def _old_utc(hours: float = 1.0) -> datetime:
+    return datetime.now(timezone.utc) - timedelta(hours=hours)
+
+
+def _mark_all_at_entry(service) -> None:
+    for position in service.open_positions():
+        assert position.mark_to_market(position.entry_price) is True
+
+
+def test_fresh_marks_allow_equity_based_sizing(monkeypatch, tmp_path) -> None:
+    service = _service(_trade(symbol="BTC", price=100.0, quantity=10.0))
+    _mark_all_at_entry(service)
+    assert service.summary().equity == pytest.approx(1000.0)
+
+    text = _run_analyze(monkeypatch, tmp_path, service=service)
+
+    order = service.get_position("ETH")
+    assert order is not None
+    assert order.quantity == pytest.approx(_expected_quantity(1000.0))
+    assert "Paper Order: PLACED" in text
+
+
+def test_stale_mark_blocks_new_trade(monkeypatch, tmp_path) -> None:
+    service = _service(_trade(symbol="BTC", price=100.0, quantity=10.0))
+    position = service.get_position("BTC")
+    position.mark_to_market(position.entry_price, now=_old_utc())
+
+    text = _run_analyze(monkeypatch, tmp_path, service=service)
+
+    assert "Trade Blocked: market-price data is stale or unavailable" in text
+    assert "mark older than" in text
+    assert "The trade was not placed and no fallback balance was used." in text
+    assert service.get_position("ETH") is None
+    assert len(service.open_positions()) == 1
+
+
+def test_missing_mark_blocks_new_trade(monkeypatch, tmp_path) -> None:
+    service = _service(_trade(symbol="BTC", price=100.0, quantity=10.0))
+    assert service.get_position("BTC").mark_price is None
+
+    text = _run_analyze(monkeypatch, tmp_path, service=service)
+
+    assert "no market mark: BTC" in text
+    assert service.get_position("ETH") is None
+
+
+def test_missing_timestamp_blocks_new_trade(monkeypatch, tmp_path) -> None:
+    service = _service(_trade(symbol="BTC", price=100.0, quantity=10.0))
+    position = service.get_position("BTC")
+    # Legacy/unverified shape: a price with no recorded age.
+    position.mark_price = 110.0
+    assert position.mark_at is None
+
+    text = _run_analyze(monkeypatch, tmp_path, service=service)
+
+    assert "no mark timestamp: BTC" in text
+    assert service.get_position("ETH") is None
+
+
+def test_one_stale_position_blocks_fresh_ones(monkeypatch, tmp_path) -> None:
+    service = _service(
+        _trade(symbol="BTC", price=100.0, quantity=10.0),
+        _trade(symbol="ETH", price=2000.0, quantity=1.0),
+    )
+    _mark_all_at_entry(service)
+    stale = service.get_position("ETH")
+    stale.mark_to_market(stale.entry_price, now=_old_utc())
+
+    text = _run_analyze(monkeypatch, tmp_path, service=service)
+
+    assert "mark older than" in text
+    assert "ETH" in text
+    assert service.get_position("SOL") is None
+    assert len(service.open_positions()) == 2
+
+
+def test_legacy_saved_account_without_timestamps_cannot_size(
+    monkeypatch, tmp_path
+) -> None:
+    import json
+
+    cost = _service(_trade(symbol="BTC", price=100.0, quantity=10.0))
+    position = cost.get_position("BTC")
+    position.mark_to_market(110.0)
+    path = tmp_path / "legacy_state.json"
+    cost.save_account(path)
+
+    # Simulate an account saved before mark timestamps existed.
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    for order in raw["open_positions"]:
+        order.pop("mark_at", None)
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    loaded = PaperTradingService.load_account(path)
+    assert loaded.get_position("BTC").mark_price == pytest.approx(110.0)
+    assert loaded.get_position("BTC").mark_at is None
+
+    text = _run_analyze(monkeypatch, tmp_path, service=loaded)
+
+    assert "no mark timestamp: BTC" in text
+    assert loaded.get_position("ETH") is None
+
+
+def test_unreadable_open_positions_block_sizing(monkeypatch, tmp_path) -> None:
+    service = MagicMock()
+    service.open_positions.side_effect = RuntimeError("state file corrupt")
+    service.summary.return_value = MagicMock(equity=1000.0)
+
+    text = _run_analyze(monkeypatch, tmp_path, service=service)
+
+    assert "Trade Blocked" in text
+    assert "paper account state could not be read" in text
+    service.place_trade.assert_not_called()
+
+
+def test_stale_sizing_does_not_fall_back_to_configured_balance(
+    monkeypatch, tmp_path
+) -> None:
+    service = _service(_trade(symbol="BTC", price=100.0, quantity=10.0))
+    position = service.get_position("BTC")
+    position.mark_to_market(position.entry_price, now=_old_utc())
+
+    _run_analyze(monkeypatch, tmp_path, service=service)
+
+    assert service.get_position("ETH") is None
+
+
+# ---------------------------------------------------------------------------
+# Freshness policy
+# ---------------------------------------------------------------------------
+
+
+def _fresh_position(symbol: str = "BTC", mark_at: datetime | None = None):
+    from types import SimpleNamespace
+
+    moment = mark_at or datetime.now(timezone.utc)
+    return SimpleNamespace(
+        symbol=symbol,
+        mark_price=100.0,
+        mark_at=moment.isoformat(),
+    )
+
+
+def test_no_open_positions_are_fresh() -> None:
+    result = check_marks_freshness([])
+    assert result.fresh is True
+
+
+def test_freshness_accepts_recent_mark_with_injected_now() -> None:
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    position = _fresh_position(mark_at=now - timedelta(seconds=30))
+
+    result = check_marks_freshness(
+        [position], now=now, max_age_seconds=90.0
+    )
+
+    assert result.fresh is True
+    assert result.max_age_seconds == 90.0
+
+
+def test_freshness_rejects_mark_at_exact_age_boundary() -> None:
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    position = _fresh_position(mark_at=now - timedelta(seconds=91))
+
+    result = check_marks_freshness(
+        [position], now=now, max_age_seconds=90.0
+    )
+
+    assert result.fresh is False
+    assert result.stale_symbols == ("BTC",)
+
+
+def test_freshness_rejects_future_timestamp() -> None:
+    now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    position = _fresh_position(mark_at=now + timedelta(minutes=5))
+
+    result = check_marks_freshness(
+        [position], now=now, max_age_seconds=90.0
+    )
+
+    assert result.fresh is False
+
+
+def test_freshness_rejects_unparseable_timestamp() -> None:
+    from types import SimpleNamespace
+
+    position = SimpleNamespace(
+        symbol="BTC", mark_price=100.0, mark_at="not-a-timestamp"
+    )
+
+    result = check_marks_freshness([position])
+
+    assert result.fresh is False
+    assert result.missing_timestamp_symbols == ("BTC",)
+
+
+def test_freshness_rejects_invalid_mark_price() -> None:
+    from types import SimpleNamespace
+
+    position = SimpleNamespace(
+        symbol="BTC",
+        mark_price=0.0,
+        mark_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+    result = check_marks_freshness([position])
+
+    assert result.fresh is False
+    assert result.missing_mark_symbols == ("BTC",)
+
+
+def test_max_mark_age_is_two_monitor_intervals() -> None:
+    assert max_mark_age_seconds(45.0) == pytest.approx(90.0)
+    assert max_mark_age_seconds(10.0) == pytest.approx(20.0)
+
+
+@pytest.mark.parametrize("interval", [0, -1, None, "45", float("nan")])
+def test_max_mark_age_falls_back_when_monitor_disabled(interval) -> None:
+    assert max_mark_age_seconds(interval) == pytest.approx(
+        DEFAULT_MAX_MARK_AGE_SECONDS
+    )

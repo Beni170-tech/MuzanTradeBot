@@ -40,6 +40,11 @@ from trader.paper.correlation_risk import (
     trade_exposure,
 )
 from trader.paper.daily_risk import DailyRiskManager
+from trader.paper.mark_freshness import (
+    MarksFreshnessResult,
+    check_marks_freshness,
+    max_mark_age_seconds,
+)
 from trader.paper.max_open_positions import MaxOpenPositionsManager
 from trader.paper.portfolio_risk import (
     PortfolioRiskManager,
@@ -183,6 +188,58 @@ def _sizing_profile() -> RiskProfile:
         return RiskProfile.from_settings(settings)
     return RiskProfile.from_settings(
         settings, balance=_paper_equity_for_sizing()
+    )
+
+
+def _paper_mark_block() -> MarksFreshnessResult | None:
+    """Return the freshness result that forbids sizing, or None.
+
+    Equity-based sizing values open positions at recorded market marks,
+    so every open position must have a valid, recent mark before a new
+    trade may be sized. A missing/invalid/stale mark (or unreadable
+    account state) blocks the trade; it never falls back to
+    ``ACCOUNT_BALANCE``, an entry price, or an old mark.
+
+    Returns:
+        None when sizing may proceed (including when paper trading is
+        disabled), otherwise the freshness result explaining the block.
+    """
+    if not settings.PAPER_TRADING:
+        return None
+
+    max_age = max_mark_age_seconds(settings.PAPER_MONITOR_INTERVAL_SECONDS)
+    try:
+        positions = _get_paper_service().open_positions()
+    except Exception:
+        logger.warning(
+            "Could not read open paper positions for mark freshness; "
+            "refusing to size this trade.",
+            exc_info=True,
+        )
+        return MarksFreshnessResult(
+            fresh=False,
+            reason="paper account state could not be read",
+            max_age_seconds=max_age,
+        )
+
+    result = check_marks_freshness(positions, max_age_seconds=max_age)
+    return None if result.fresh else result
+
+
+def _stale_mark_message(analysis: dict, block: MarksFreshnessResult) -> str:
+    """Build the Telegram reply that explains a stale-mark block."""
+    return (
+        f"📊 Analysis for {analysis.get('symbol', '?')}\n\n"
+        f"Price: {analysis.get('price')}\n"
+        f"Trend: {analysis.get('trend', 'Unknown')}\n"
+        f"Signal: {analysis.get('signal', 'Unknown')}\n"
+        f"Confidence: {analysis.get('confidence', 'Unknown')}%\n\n"
+        f"⛔ Trade Blocked: market-price data is stale or unavailable\n"
+        f"   {block.reason}\n"
+        f"   Sizing needs a verified market mark for every open position "
+        f"no older than {block.max_age_seconds:.0f}s.\n"
+        f"   The trade was not placed and no fallback balance was used.\n"
+        f"   Wait for the position monitor to refresh prices, then try again."
     )
 
 
@@ -495,6 +552,21 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     result = analyze_coin(coin)
     decision = make_decision(result)
+
+    # Refuse to size a new trade from stale or missing market marks. This
+    # runs before sizing so no fallback balance can be used.
+    mark_block = _paper_mark_block()
+    if mark_block is not None:
+        logger.warning(
+            "Paper trade for %s blocked: stale or missing market marks (%s).",
+            result.get("symbol"),
+            mark_block.reason,
+        )
+        await update.message.reply_text(
+            _stale_mark_message(result, mark_block)
+        )
+        return
+
     profile = _sizing_profile()
     verdict = validate_trade(decision, result, profile)
     trade = build_trade(result, verdict, profile)

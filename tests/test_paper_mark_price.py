@@ -448,3 +448,101 @@ def test_stats_command_labels_open_pnl_marks() -> None:
     msg = _run_stats_command(service)
 
     assert "Open PnL: $100.00 (last recorded marks)" in msg
+
+
+# ---------------------------------------------------------------------------
+# Mark timestamps (stale-mark safeguard)
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+from trader.paper.mark_freshness import parse_mark_timestamp  # noqa: E402
+
+
+def test_mark_to_market_records_utc_timestamp() -> None:
+    order = _order()
+    moment = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+
+    assert order.mark_to_market(110.0, now=moment) is True
+    assert parse_mark_timestamp(order.mark_at) == moment
+
+
+def test_mark_to_market_treats_naive_timestamp_as_utc() -> None:
+    order = _order()
+
+    assert order.mark_to_market(110.0, now=datetime(2026, 1, 1, 12, 0)) is True
+
+    assert parse_mark_timestamp(order.mark_at) == datetime(
+        2026, 1, 1, 12, 0, tzinfo=timezone.utc
+    )
+
+
+def test_mark_timestamp_round_trips_through_storage(tmp_path) -> None:
+    path = tmp_path / "paper_state.json"
+    service = _service(_trade(quantity=10.0))
+    position = service.open_positions()[0]
+    position.mark_to_market(110.0)
+    original_mark_at = position.mark_at
+    service.save_account(path)
+
+    loaded = PaperTradingService.load_account(path)
+
+    assert loaded.open_positions()[0].mark_at == original_mark_at
+    assert parse_mark_timestamp(loaded.open_positions()[0].mark_at) is not None
+
+
+def test_unmarked_position_round_trips_without_timestamp(tmp_path) -> None:
+    path = tmp_path / "paper_state.json"
+    service = _service(_trade(quantity=10.0))
+    service.save_account(path)
+
+    loaded = PaperTradingService.load_account(path)
+
+    assert loaded.open_positions()[0].mark_at is None
+
+
+@pytest.mark.asyncio
+async def test_monitor_records_price_and_timestamp(tmp_path) -> None:
+    service = _service(_trade(quantity=10.0))
+    monitor = PaperPositionMonitor(
+        service,
+        _RecordingAlerts(),
+        sltp_check=lambda svc, symbol, price: None,
+        trailing_fn=lambda svc, symbol, price: None,
+        price_provider=lambda symbol: 105.0,
+        state_path=tmp_path / "paper_state.json",
+    )
+
+    before = datetime.now(timezone.utc)
+    await monitor.monitor_open_positions()
+    after = datetime.now(timezone.utc)
+
+    position = service.get_position("BTC")
+    assert position.mark_price == pytest.approx(105.0)
+    marked_at = parse_mark_timestamp(position.mark_at)
+    assert marked_at is not None
+    assert before - timedelta(seconds=1) <= marked_at <= after + timedelta(seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_failed_price_update_does_not_refresh_timestamp(tmp_path) -> None:
+    service = _service(_trade(quantity=10.0))
+    prices = {"BTC": 105.0}
+    monitor = PaperPositionMonitor(
+        service,
+        _RecordingAlerts(),
+        sltp_check=lambda svc, symbol, price: None,
+        trailing_fn=lambda svc, symbol, price: None,
+        price_provider=lambda symbol: prices[symbol],
+        state_path=tmp_path / "paper_state.json",
+    )
+    await monitor.monitor_open_positions()
+    first_mark_at = service.get_position("BTC").mark_at
+    assert first_mark_at is not None
+
+    prices["BTC"] = float("nan")
+    await monitor.monitor_open_positions()
+
+    position = service.get_position("BTC")
+    assert position.mark_at == first_mark_at
+    assert position.mark_price == pytest.approx(105.0)

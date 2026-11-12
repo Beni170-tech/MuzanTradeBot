@@ -15,7 +15,7 @@ Sprint 5D scope:
 
 import math
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
@@ -80,6 +80,10 @@ class PaperOrder:
     # no market mark has been recorded yet; the entry price is never used as
     # a substitute, so an unmarked position contributes 0.0 unrealized PnL.
     mark_price: Optional[float] = None
+    # UTC timestamp of ``mark_price`` as an ISO 8601 string. ``None`` means
+    # the mark has no verified age (for example a legacy saved account), so
+    # sizing must not treat that mark as fresh.
+    mark_at: Optional[str] = None
     paper: bool = True
     notes: list[str] = field(default_factory=list)
 
@@ -112,15 +116,20 @@ class PaperOrder:
             price_diff = -price_diff
         return price_diff * self.quantity
 
-    def mark_to_market(self, current_price: float) -> bool:
+    def mark_to_market(
+        self, current_price: float, now: datetime | None = None
+    ) -> bool:
         """Record a validated market price and refresh unrealized PnL.
 
         Only a finite, strictly positive number is accepted. A rejected
-        value leaves any previously recorded mark untouched, so a bad
-        market read can never overwrite a good mark with nonsense.
+        value leaves any previously recorded mark and timestamp untouched,
+        so a bad market read can never refresh the age of a stale mark.
 
         Args:
             current_price: The market price to record for this position.
+            now: Optional UTC timestamp for the mark. Defaults to the
+                current UTC time. Naive datetimes are treated as UTC so
+                stored timestamps always describe an absolute instant.
 
         Returns:
             True when the mark was recorded, False when the price was not
@@ -133,7 +142,12 @@ class PaperOrder:
         if not math.isfinite(current_price) or current_price <= 0:
             return False
 
+        timestamp = now or datetime.now(timezone.utc)
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+
         self.mark_price = float(current_price)
+        self.mark_at = timestamp.astimezone(timezone.utc).isoformat()
         self.unrealized_pnl = self.unrealized_pnl_for(self.mark_price)
         return True
 

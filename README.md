@@ -77,3 +77,23 @@ read, sizing fails closed and the trade is rejected rather than sized
 from a stale configured balance. `ACCOUNT_BALANCE` remains the starting
 balance for a new paper account and the sizing fallback only when paper
 trading is disabled.
+
+### Stale market marks
+
+Every recorded mark also stores a UTC timestamp (`mark_at`). Before a
+new `/analyze` trade is sized, every open paper position must have a
+valid mark price and a timestamp no older than **two monitor polling
+intervals** (`2 × PAPER_MONITOR_INTERVAL_SECONDS`; 90 seconds with the
+default 45-second interval). One missed monitor cycle plus scheduling
+jitter is tolerated. When the background monitor is disabled
+(`PAPER_MONITOR_INTERVAL_SECONDS <= 0`), the same 90-second default
+applies, because nothing refreshes marks in the background.
+
+If any open position has a missing mark, a missing timestamp, or a mark
+older than the threshold, `/analyze` refuses to size the trade. It
+never falls back to `ACCOUNT_BALANCE`, an entry price, or an old mark,
+and the Telegram reply says the trade was blocked because market-price
+data is stale or unavailable. Accounts saved before timestamps existed
+load normally, but their unverified marks cannot be used for sizing
+until the monitor records a fresh price. Failed market reads never
+refresh a mark's timestamp.
