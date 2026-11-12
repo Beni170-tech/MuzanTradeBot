@@ -104,6 +104,22 @@ class PaperOrder:
             Unrealized profit (positive) or loss (negative) for the
             open position at ``current_price``.
         """
+        if (
+            isinstance(self.quantity, bool)
+            or isinstance(self.entry_price, bool)
+            or not isinstance(self.quantity, (int, float))
+            or not isinstance(self.entry_price, (int, float))
+        ):
+            return 0.0
+        try:
+            finite = math.isfinite(self.quantity) and math.isfinite(
+                self.entry_price
+            )
+        except OverflowError:
+            # ``math.isfinite`` cannot convert an extremely large int.
+            return 0.0
+        if not finite:
+            return 0.0
         if self.quantity <= 0 or self.entry_price <= 0:
             return 0.0
         if isinstance(current_price, bool) or not isinstance(
