@@ -21,10 +21,21 @@ class RiskProfile:
     take_profit_percent: float = 4.0
 
     @classmethod
-    def from_settings(cls, settings) -> "RiskProfile":
-        """Build a profile from the central Settings object."""
+    def from_settings(
+        cls, settings, balance: float | None = None
+    ) -> "RiskProfile":
+        """Build a profile from the central Settings object.
+
+        Args:
+            settings: The central Settings object.
+            balance: Optional balance override used for position sizing.
+                Callers pass the live account balance/equity here so the
+                risk budget follows the account instead of a static
+                configuration value. When None, the configured
+                ``ACCOUNT_BALANCE`` is used.
+        """
         return cls(
-            balance=settings.ACCOUNT_BALANCE,
+            balance=settings.ACCOUNT_BALANCE if balance is None else balance,
             risk_percent=settings.RISK_PERCENT,
             stop_loss_percent=settings.STOP_LOSS_PERCENT,
             take_profit_percent=settings.TAKE_PROFIT_PERCENT,

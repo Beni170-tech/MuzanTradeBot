@@ -143,6 +143,49 @@ def _get_paper_service() -> PaperTradingService:
     return _paper_service
 
 
+def _paper_equity_for_sizing() -> float:
+    """Return the paper account equity used to size a new trade.
+
+    Guardian Mode sizes from the capital that is actually at risk, so
+    realized losses and unrealized results at recorded marks shrink or
+    grow the risk budget instead of every trade sizing from the static
+    configured balance.
+
+    A failure to read the account fails closed with 0.0: the risk manager
+    then rejects the trade (balance must be positive) rather than silently
+    sizing from a configured balance that no longer matches the account.
+
+    Returns:
+        The paper account equity, or 0.0 when it cannot be read.
+    """
+    try:
+        return float(_get_paper_service().summary().equity)
+    except Exception:
+        logger.warning(
+            "Could not read paper account equity for position sizing; "
+            "refusing to size this trade.",
+            exc_info=True,
+        )
+        return 0.0
+
+
+def _sizing_profile() -> RiskProfile:
+    """Build the risk profile that drives this trade's position size.
+
+    In paper mode, sizing uses the paper account's current equity. When
+    paper trading is disabled there is no paper account to read, so the
+    configured balance is used as before.
+
+    Returns:
+        The RiskProfile for the current analysis request.
+    """
+    if not settings.PAPER_TRADING:
+        return RiskProfile.from_settings(settings)
+    return RiskProfile.from_settings(
+        settings, balance=_paper_equity_for_sizing()
+    )
+
+
 def _format_pnl_label(order: PaperOrder) -> str:
     """Return WIN / LOSS / BREAKEVEN label for a closed order."""
     if order.realized_pnl > 0:
@@ -452,7 +495,7 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     result = analyze_coin(coin)
     decision = make_decision(result)
-    profile = RiskProfile.from_settings(settings)
+    profile = _sizing_profile()
     verdict = validate_trade(decision, result, profile)
     trade = build_trade(result, verdict, profile)
     log_trade(

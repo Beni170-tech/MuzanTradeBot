@@ -69,5 +69,11 @@ active execution backend (`PaperBroker.get_open_positions()`), so the
 configured portfolio-wide cap blocks new paper trades once the limit is
 reached. The count and cap are also reported by `/stats`.
 
-Position sizing still uses the configured `ACCOUNT_BALANCE`; account
-equity does not feed position sizing yet.
+Position sizing follows the paper account: each new paper trade risks
+`RISK_PERCENT` of the account's current equity (settled balance plus
+unrealized PnL at recorded marks), so realized losses and floating
+results shrink or grow the risk budget. If the paper account cannot be
+read, sizing fails closed and the trade is rejected rather than sized
+from a stale configured balance. `ACCOUNT_BALANCE` remains the starting
+balance for a new paper account and the sizing fallback only when paper
+trading is disabled.
