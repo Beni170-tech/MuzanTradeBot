@@ -29,6 +29,22 @@ class PaperRuleResult:
     reason: str
 
 
+def _is_valid_paper_number(value: object) -> bool:
+    """Return True only for a finite, strictly positive number.
+
+    Booleans are rejected even though ``bool`` subclasses ``int``, since
+    a boolean is never a price or a position size. NaN and both
+    infinities are rejected because they would poison PnL and equity.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return math.isfinite(number) and number > 0
+
+
 def is_valid_exit_price(exit_price: object) -> bool:
     """Return True only for a usable paper exit price.
 
@@ -95,13 +111,13 @@ def validate_paper_trade(
             reason="trade.side must be 'LONG', 'SHORT', 'BUY', or 'SELL'",
         )
 
-    if not isinstance(quantity, (int, float)) or quantity <= 0:
+    if not _is_valid_paper_number(quantity):
         return PaperRuleResult(
             ok=False,
             reason="trade.position_size must be a positive number",
         )
 
-    if not isinstance(price, (int, float)) or price <= 0:
+    if not _is_valid_paper_number(price):
         return PaperRuleResult(
             ok=False,
             reason="trade.price must be a positive number",

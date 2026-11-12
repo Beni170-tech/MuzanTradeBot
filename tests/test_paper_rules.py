@@ -150,6 +150,25 @@ def test_non_numeric_position_size_fails() -> None:
     assert "position_size" in result.reason
 
 
+@pytest.mark.parametrize("bad_size", [True, False])
+def test_boolean_position_size_fails(bad_size: bool) -> None:
+    trade = _valid_trade(position_size=bad_size)  # type: ignore[arg-type]
+    result = validate_paper_trade(trade)
+    assert result.ok is False
+    assert "position_size" in result.reason
+
+
+@pytest.mark.parametrize(
+    "bad_size",
+    [float("nan"), float("inf"), float("-inf")],
+)
+def test_non_finite_position_size_fails(bad_size: float) -> None:
+    trade = _valid_trade(position_size=bad_size)
+    result = validate_paper_trade(trade)
+    assert result.ok is False
+    assert "position_size" in result.reason
+
+
 # ---------------------------------------------------------------------------
 # validate_paper_trade — price validation
 # ---------------------------------------------------------------------------
@@ -181,6 +200,44 @@ def test_non_numeric_price_fails() -> None:
     result = validate_paper_trade(trade)
     assert result.ok is False
     assert "price" in result.reason
+
+
+@pytest.mark.parametrize("bad_price", [True, False])
+def test_boolean_price_fails(bad_price: bool) -> None:
+    trade = _valid_trade(price=bad_price)  # type: ignore[arg-type]
+    result = validate_paper_trade(trade)
+    assert result.ok is False
+    assert "price" in result.reason
+
+
+@pytest.mark.parametrize(
+    "bad_price",
+    [float("nan"), float("inf"), float("-inf")],
+)
+def test_non_finite_price_fails(bad_price: float) -> None:
+    trade = _valid_trade(price=bad_price)
+    result = validate_paper_trade(trade)
+    assert result.ok is False
+    assert "price" in result.reason
+
+
+@pytest.mark.parametrize(
+    ("valid_size", "valid_price"),
+    [
+        (1, 1),
+        (0.5, 0.00000001),
+        (10, 100),
+        (1e-8, 1e12),
+        (100.25, 0.75),
+    ],
+)
+def test_valid_positive_finite_values_pass(
+    valid_size: float, valid_price: float
+) -> None:
+    trade = _valid_trade(position_size=valid_size, price=valid_price)
+    result = validate_paper_trade(trade)
+    assert result.ok is True
+    assert result.reason == ""
 
 
 # ---------------------------------------------------------------------------
