@@ -160,6 +160,7 @@ def _order_to_dict(order: PaperOrder) -> dict[str, Any]:
         "unrealized_pnl": order.unrealized_pnl,
         "mark_price": order.mark_price,
         "mark_at": order.mark_at,
+        "initial_risk_distance": order.initial_risk_distance,
         "paper": order.paper,
         "notes": order.notes,
     }
@@ -236,6 +237,9 @@ def _dict_to_order(data: dict[str, Any]) -> PaperOrder:
     )
     mark_price = _optional_positive_price(data, "mark_price", context=context)
     exit_price = _optional_positive_price(data, "exit_price", context=context)
+    initial_risk_distance = _optional_positive_price(
+        data, "initial_risk_distance", context=context
+    )
 
     trade_data = data.get("trade")
     trade = None
@@ -293,6 +297,7 @@ def _dict_to_order(data: dict[str, Any]) -> PaperOrder:
         unrealized_pnl=unrealized_pnl,
         mark_price=mark_price,
         mark_at=data.get("mark_at"),
+        initial_risk_distance=initial_risk_distance,
         paper=data.get("paper", True),
         notes=list(data.get("notes", [])),
     )

@@ -16,18 +16,27 @@ def _valid_trade(
     position_size: float = 10.0,
     price: float = 100.0,
 ) -> Trade:
-    """Build a minimal valid Trade for validation tests."""
+    """Build a minimal valid Trade with correctly oriented protection."""
+    is_short = isinstance(side, str) and side.strip().upper() in {
+        "SHORT",
+        "SELL",
+    }
+    numeric_price = (
+        float(price)
+        if isinstance(price, (int, float)) and not isinstance(price, bool)
+        else 100.0
+    )
     return Trade(
         symbol=symbol,
         price=price,
-        trend="Bullish",
-        signal="BUY",
+        trend="Bullish" if not is_short else "Bearish",
+        signal="BUY" if not is_short else "SELL",
         confidence=80,
-        decision="BUY",
+        decision="BUY" if not is_short else "SELL",
         risk_verdict="APPROVED",
         position_size=position_size,
-        stop_loss=98.0,
-        take_profit=104.0,
+        stop_loss=numeric_price * 1.02 if is_short else numeric_price * 0.98,
+        take_profit=numeric_price * 0.96 if is_short else numeric_price * 1.04,
         side=side,
         approved=True,
     )
@@ -238,6 +247,105 @@ def test_valid_positive_finite_values_pass(
     result = validate_paper_trade(trade)
     assert result.ok is True
     assert result.reason == ""
+
+
+# ---------------------------------------------------------------------------
+# validate_paper_trade — stop-loss / take-profit protection
+# ---------------------------------------------------------------------------
+
+def _trade_with_protection(
+    stop_loss: object,
+    take_profit: object,
+    *,
+    side: str = "LONG",
+    price: float = 100.0,
+) -> Trade:
+    """Build a trade with explicit protection values for boundary tests."""
+    return Trade(
+        symbol="BTC",
+        price=price,
+        trend="Bullish",
+        signal="BUY",
+        confidence=80,
+        decision="BUY",
+        risk_verdict="APPROVED",
+        position_size=10.0,
+        stop_loss=stop_loss,  # type: ignore[arg-type]
+        take_profit=take_profit,  # type: ignore[arg-type]
+        side=side,
+        approved=True,
+    )
+
+
+INVALID_PROTECTION_VALUES = [
+    None,
+    "98",
+    True,
+    False,
+    float("nan"),
+    float("inf"),
+    float("-inf"),
+    0,
+    -1.0,
+]
+
+
+@pytest.mark.parametrize("value", INVALID_PROTECTION_VALUES)
+def test_invalid_stop_loss_is_rejected(value: object) -> None:
+    result = validate_paper_trade(
+        _trade_with_protection(stop_loss=value, take_profit=104.0)
+    )
+    assert result.ok is False
+    assert "stop_loss" in result.reason
+
+
+@pytest.mark.parametrize("value", INVALID_PROTECTION_VALUES)
+def test_invalid_take_profit_is_rejected(value: object) -> None:
+    result = validate_paper_trade(
+        _trade_with_protection(stop_loss=98.0, take_profit=value)
+    )
+    assert result.ok is False
+    assert "take_profit" in result.reason
+
+
+@pytest.mark.parametrize("stop_loss", [100.0, 100.01, 101.0])
+def test_long_stop_loss_must_be_below_entry(stop_loss: float) -> None:
+    result = validate_paper_trade(
+        _trade_with_protection(stop_loss=stop_loss, take_profit=104.0)
+    )
+    assert result.ok is False
+    assert "stop_loss must be below" in result.reason
+
+
+@pytest.mark.parametrize("take_profit", [100.0, 99.99, 95.0])
+def test_long_take_profit_must_be_above_entry(take_profit: float) -> None:
+    result = validate_paper_trade(
+        _trade_with_protection(stop_loss=98.0, take_profit=take_profit)
+    )
+    assert result.ok is False
+    assert "take_profit must be above" in result.reason
+
+
+@pytest.mark.parametrize("stop_loss", [100.0, 99.99, 95.0])
+def test_short_stop_loss_must_be_above_entry(stop_loss: float) -> None:
+    result = validate_paper_trade(
+        _trade_with_protection(
+            stop_loss=stop_loss, take_profit=96.0, side="SHORT"
+        )
+    )
+    assert result.ok is False
+    assert "stop_loss must be above" in result.reason
+
+
+@pytest.mark.parametrize("take_profit", [100.0, 100.01, 105.0])
+def test_short_take_profit_must_be_below_entry(take_profit: float) -> None:
+    result = validate_paper_trade(
+        _trade_with_protection(
+            stop_loss=102.0, take_profit=take_profit, side="SHORT"
+        )
+    )
+    assert result.ok is False
+    assert "take_profit must be below" in result.reason
 
 
 # ---------------------------------------------------------------------------

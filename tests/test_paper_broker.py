@@ -31,9 +31,14 @@ def _valid_trade(
     side: str = "LONG",
     position_size: float = 10.0,
     price: float = 100.0,
-    stop_loss: float = 98.0,
-    take_profit: float = 104.0,
+    stop_loss: float | None = None,
+    take_profit: float | None = None,
 ) -> Trade:
+    is_short = side.strip().upper() in {"SHORT", "SELL"}
+    if stop_loss is None:
+        stop_loss = price * 1.02 if is_short else price * 0.98
+    if take_profit is None:
+        take_profit = price * 0.96 if is_short else price * 1.04
     return Trade(
         symbol=symbol,
         price=price,
@@ -45,6 +50,28 @@ def _valid_trade(
         position_size=position_size,
         stop_loss=stop_loss,
         take_profit=take_profit,
+        side=side,
+        approved=True,
+    )
+
+
+def _invalid_protection_trade(
+    *,
+    stop_loss: object,
+    take_profit: object,
+    side: str = "LONG",
+) -> Trade:
+    return Trade(
+        symbol="BTC",
+        price=100.0,
+        trend="Bullish",
+        signal="BUY",
+        confidence=80,
+        decision="BUY",
+        risk_verdict="APPROVED",
+        position_size=10.0,
+        stop_loss=stop_loss,  # type: ignore[arg-type]
+        take_profit=take_profit,  # type: ignore[arg-type]
         side=side,
         approved=True,
     )
@@ -213,6 +240,72 @@ def test_get_open_positions_excludes_closed() -> None:
     order = broker.place_order(trade)
     broker.account.close_position(order.order_id)
     assert broker.get_open_positions() == ()
+
+
+# ---------------------------------------------------------------------------
+# place_order - protection validation at the execution boundary
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "stop_loss, take_profit, side",
+    [
+        (None, 104.0, "LONG"),
+        (98.0, None, "LONG"),
+        ("98", 104.0, "LONG"),
+        (98.0, "104", "LONG"),
+        (True, 104.0, "LONG"),
+        (98.0, False, "LONG"),
+        (float("nan"), 104.0, "LONG"),
+        (98.0, float("inf"), "LONG"),
+        (float("-inf"), 104.0, "LONG"),
+        (0.0, 104.0, "LONG"),
+        (-1.0, 104.0, "LONG"),
+        (98.0, 0.0, "LONG"),
+        (98.0, -1.0, "LONG"),
+        (100.0, 104.0, "LONG"),
+        (101.0, 104.0, "LONG"),
+        (98.0, 100.0, "LONG"),
+        (98.0, 99.0, "LONG"),
+        (100.0, 96.0, "SHORT"),
+        (99.0, 96.0, "SHORT"),
+        (102.0, 100.0, "SHORT"),
+        (102.0, 101.0, "SHORT"),
+    ],
+)
+def test_invalid_protection_cannot_enter_broker(
+    stop_loss: object, take_profit: object, side: str
+) -> None:
+    broker = _broker()
+    trade = _invalid_protection_trade(
+        stop_loss=stop_loss, take_profit=take_profit, side=side
+    )
+
+    assert broker.place_order(trade) is None
+    assert broker.account.open_count == 0
+    assert broker.get_open_positions() == ()
+
+
+def test_valid_short_protection_enters_broker() -> None:
+    broker = _broker()
+    trade = _valid_trade(
+        side="SHORT", price=100.0, stop_loss=102.0, take_profit=96.0
+    )
+
+    order = broker.place_order(trade)
+
+    assert order is not None
+    assert order.stop_loss == 102.0
+    assert order.take_profit == 96.0
+
+
+def test_placement_records_initial_risk_distance() -> None:
+    broker = _broker()
+    order = broker.place_order(
+        _valid_trade(price=100.0, stop_loss=90.0, take_profit=120.0)
+    )
+
+    assert order is not None
+    assert order.initial_risk_distance == pytest.approx(10.0)
 
 
 # ---------------------------------------------------------------------------

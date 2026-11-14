@@ -123,4 +123,46 @@ def validate_paper_trade(
             reason="trade.price must be a positive number",
         )
 
+    stop_loss = trade.stop_loss
+    take_profit = trade.take_profit
+
+    if not _is_valid_paper_number(stop_loss):
+        return PaperRuleResult(
+            ok=False,
+            reason="trade.stop_loss must be a positive number",
+        )
+
+    if not _is_valid_paper_number(take_profit):
+        return PaperRuleResult(
+            ok=False,
+            reason="trade.take_profit must be a positive number",
+        )
+
+    entry_price = float(price)
+    stop_price = float(stop_loss)
+    target_price = float(take_profit)
+
+    if normalized_side in ("LONG", "BUY"):
+        if not stop_price < entry_price:
+            return PaperRuleResult(
+                ok=False,
+                reason="LONG trade.stop_loss must be below the entry price",
+            )
+        if not target_price > entry_price:
+            return PaperRuleResult(
+                ok=False,
+                reason="LONG trade.take_profit must be above the entry price",
+            )
+    else:
+        if not stop_price > entry_price:
+            return PaperRuleResult(
+                ok=False,
+                reason="SHORT trade.stop_loss must be above the entry price",
+            )
+        if not target_price < entry_price:
+            return PaperRuleResult(
+                ok=False,
+                reason="SHORT trade.take_profit must be below the entry price",
+            )
+
     return PaperRuleResult(ok=True, reason="")

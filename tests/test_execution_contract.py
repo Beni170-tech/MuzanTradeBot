@@ -19,9 +19,14 @@ def _valid_trade(
     side: str = "LONG",
     position_size: float = 10.0,
     price: float = 100.0,
-    stop_loss: float = 98.0,
-    take_profit: float = 104.0,
+    stop_loss: float | None = None,
+    take_profit: float | None = None,
 ) -> Trade:
+    is_short = side.strip().upper() in {"SHORT", "SELL"}
+    if stop_loss is None:
+        stop_loss = price * 1.02 if is_short else price * 0.98
+    if take_profit is None:
+        take_profit = price * 0.96 if is_short else price * 1.04
     return Trade(
         symbol=symbol,
         price=price,

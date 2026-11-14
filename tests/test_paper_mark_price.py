@@ -37,9 +37,14 @@ def _trade(
     price: float = 100.0,
     quantity: float = 10.0,
     side: str = "LONG",
-    stop_loss: float = 95.0,
-    take_profit: float = 120.0,
+    stop_loss: float | None = None,
+    take_profit: float | None = None,
 ) -> Trade:
+    is_short = side.strip().upper() == "SHORT"
+    if stop_loss is None:
+        stop_loss = price * 1.05 if is_short else price * 0.95
+    if take_profit is None:
+        take_profit = price * 0.80 if is_short else price * 1.20
     return Trade(
         symbol=symbol,
         price=price,

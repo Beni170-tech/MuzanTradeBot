@@ -63,6 +63,12 @@ def _make_broker(open_positions=None):
 
 def _make_trade(price=100.0, position_size=10.0, side="LONG", symbol="BTC") -> Trade:
     """Create a real Trade for contract/paper tests."""
+    is_short = side.strip().upper() == "SHORT"
+    numeric_price = (
+        float(price)
+        if isinstance(price, (int, float)) and not isinstance(price, bool)
+        else 100.0
+    )
     return Trade(
         symbol=symbol,
         price=price,
@@ -72,8 +78,8 @@ def _make_trade(price=100.0, position_size=10.0, side="LONG", symbol="BTC") -> T
         decision="BUY",
         risk_verdict="APPROVED",
         position_size=position_size,
-        stop_loss=98.0,
-        take_profit=104.0,
+        stop_loss=numeric_price * 1.02 if is_short else numeric_price * 0.98,
+        take_profit=numeric_price * 0.96 if is_short else numeric_price * 1.04,
         side=side,
         approved=True,
     )

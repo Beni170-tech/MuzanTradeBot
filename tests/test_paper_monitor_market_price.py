@@ -17,8 +17,10 @@ import pytest
 
 from market import analyzer
 from market.analyzer import get_current_price
+from trader.paper.account import PaperAccount
+from trader.paper.broker import PaperBroker
 from trader.paper.monitor import PaperPositionMonitor
-from trader.paper.order import PaperOrderStatus
+from trader.paper.order import PaperOrder, PaperOrderSide, PaperOrderStatus
 from trader.paper.service import PaperTradingService
 from trader.trade import Trade
 
@@ -42,10 +44,14 @@ class _RecordingAlerts:
 def _make_trade(
     symbol: str = "BTC",
     price: float = 100.0,
-    stop_loss: float = 90.0,
-    take_profit: float = 120.0,
+    stop_loss: float | None = None,
+    take_profit: float | None = None,
     quantity: float = 1.0,
 ) -> Trade:
+    if stop_loss is None:
+        stop_loss = price * 0.90
+    if take_profit is None:
+        take_profit = price * 1.20
     return Trade(
         symbol=symbol,
         price=price,
@@ -75,6 +81,32 @@ def _service_with(*trades: Trade):
     orders = [service.place_trade(trade) for trade in trades]
     assert all(order is not None for order in orders)
     return service, orders
+
+
+def _service_with_legacy_long(
+    price: float = 100.0,
+    stop_loss: float = 101.0,
+    take_profit: float = 130.0,
+):
+    """Insert a position directly to exercise the monitor's price guard.
+
+    The wrong-sided stop makes an entry-price substitution visible. The
+    broker now rejects such a trade at placement, so this legacy position
+    is inserted directly into the account for these monitor-only tests.
+    """
+    account = PaperAccount(initial_balance=1000.0, current_balance=1000.0)
+    order = PaperOrder(
+        order_id="LEGACY-1",
+        symbol="BTC",
+        side=PaperOrderSide.LONG,
+        quantity=1.0,
+        entry_price=price,
+        stop_loss=stop_loss,
+        take_profit=take_profit,
+        status=PaperOrderStatus.OPEN,
+    )
+    account.open_position(order)
+    return PaperTradingService(account, PaperBroker(account)), (order,)
 
 
 def _monitor(service, price_provider) -> PaperPositionMonitor:
@@ -210,9 +242,7 @@ async def test_failed_price_request_does_not_close_position(
     paper_state, caplog
 ):
     """A wrong-sided stop would trigger if entry_price were substituted."""
-    service, (order,) = _service_with(
-        _make_trade(stop_loss=101.0, take_profit=130.0)
-    )
+    service, (order,) = _service_with_legacy_long()
     monitor = _monitor(service, lambda symbol: None)
 
     with caplog.at_level(logging.WARNING, logger="trader.paper.monitor"):
@@ -231,9 +261,7 @@ async def test_failed_price_request_does_not_close_position(
 async def test_invalid_or_missing_price_does_not_use_entry_price(
     paper_state, bad_price
 ):
-    service, (order,) = _service_with(
-        _make_trade(stop_loss=101.0, take_profit=130.0)
-    )
+    service, (order,) = _service_with_legacy_long()
     monitor = _monitor(service, lambda symbol: bad_price)
 
     await monitor.monitor_open_positions()

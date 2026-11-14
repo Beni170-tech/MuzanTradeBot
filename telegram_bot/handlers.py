@@ -201,9 +201,14 @@ def _valid_current_price(value: object) -> float | None:
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    if not math.isfinite(value) or value <= 0:
+    try:
+        if not math.isfinite(value) or value <= 0:
+            return None
+        return float(value)
+    except (OverflowError, ValueError):
+        # An int too large for a float is not a usable price; never let
+        # the monitor crash on malformed data.
         return None
-    return float(value)
 
 
 def _current_quote(symbol: str) -> float | None:
@@ -318,6 +323,34 @@ def _apply_trailing_stop(
     )
 
 
+def _initial_risk_distance(position: object) -> float | None:
+    """Return the fixed entry-to-stop risk distance for a position.
+
+    New positions record ``initial_risk_distance`` when they are placed.
+    Legacy saved positions do not have that field, so the original
+    stop-loss on the stored trade reference is used when available. The
+    original distance must never be recalculated from a stop that has
+    already trailed.
+    """
+    stored = _valid_current_price(
+        getattr(position, "initial_risk_distance", None)
+    )
+    if stored is not None:
+        return stored
+
+    trade = getattr(position, "trade", None)
+    if trade is None:
+        return None
+
+    original_stop = _valid_current_price(getattr(trade, "stop_loss", None))
+    entry = _valid_current_price(getattr(position, "entry_price", None))
+    if original_stop is None or entry is None:
+        return None
+
+    distance = abs(entry - original_stop)
+    return distance if distance > 0 else None
+
+
 def _apply_trailing_stop_to_position(
     service: PaperTradingService,
     position: PaperOrder,
@@ -330,15 +363,19 @@ def _apply_trailing_stop_to_position(
     made, and only the supplied position can be modified.
 
     Behavior:
-        - For LONG: if price moves above entry by at least 1R
-          (entry - stop_loss distance), activate trailing and move
-          stop to break-even. After activation, trail the stop upward
+        - For LONG: if price moves above entry by at least 1R, where 1R
+          is the original entry-to-stop distance captured when the
+          position was opened, activate trailing and move the stop to
+          break-even (or keep an already tighter stop). After
+          activation, trail the stop upward by that same fixed distance
           as price rises, never moving it backward.
-        - For SHORT: mirror behavior — activate at 1R profit,
-          then trail downward.
+        - For SHORT: mirror behavior — activate at 1R profit, then trail
+          downward, never raising an already tighter stop.
         - Never moves the stop backward.
         - Never modifies take profit.
-        - Saves the paper account only when the stop actually changes.
+        - Activation always saves the paper account so the trailing
+          marker and initial risk distance survive a restart. After
+          activation, saves only when the stop actually changes.
 
     Args:
         service: The paper trading service.
@@ -368,25 +405,51 @@ def _apply_trailing_stop_to_position(
     )
     entry = position.entry_price
     stop = position.stop_loss
-    stop_distance = abs(entry - stop)
 
-    # 1R threshold: entry plus/minus one stop-loss distance
+    # Use the risk distance captured when the position was opened. For
+    # legacy positions without it, fall back to the current stop only
+    # while trailing has not moved that stop yet.
+    stop_distance = _initial_risk_distance(position)
+    if stop_distance is None:
+        try:
+            fallback_distance = abs(float(entry) - float(stop))
+        except (TypeError, ValueError, OverflowError):
+            return None
+        stop_distance = _valid_current_price(fallback_distance)
+    if stop_distance is None:
+        return None
+
+    # Backfill legacy positions as soon as the original distance is known,
+    # so it survives the next save instead of being re-derived forever.
+    # Treat an invalid stored value the same as a missing one so a bad
+    # value can never be persisted again.
+    if (
+        _valid_current_price(
+            getattr(position, "initial_risk_distance", None)
+        )
+        is None
+    ):
+        position.initial_risk_distance = stop_distance
+
+    # 1R threshold: entry plus/minus one original stop-loss distance
     if side == "LONG":
         one_r_price = entry + stop_distance
         # Not yet in 1R profit (strictly below threshold)
         if current_price <= one_r_price:
             return None
 
-        # First time crossing 1R → lock at break-even
+        # First time crossing 1R → lock at break-even, but never lower
+        # a stop that is already tighter than entry (manual/legacy).
         if not _is_trail_active(position):
-            new_stop = entry
+            new_stop = max(stop, entry)
             old_stop = stop
             position.stop_loss = new_stop
+            position.initial_risk_distance = stop_distance
             _mark_trail_active(position)
-            # Always report activation — even if stop was already at
-            # breakeven, the trail_active flag is new.
-            if new_stop != old_stop:
-                service.save_account(PAPER_STATE_PATH)
+            # Always persist activation so the marker and the original
+            # risk distance survive a restart, even if the stop was
+            # already at breakeven.
+            service.save_account(PAPER_STATE_PATH)
             return (True, old_stop, new_stop)
 
         # Already trail-active — move stop up only if price allows,
@@ -406,14 +469,15 @@ def _apply_trailing_stop_to_position(
             return None
 
         if not _is_trail_active(position):
-            new_stop = entry
+            new_stop = min(stop, entry)
             old_stop = stop
             position.stop_loss = new_stop
+            position.initial_risk_distance = stop_distance
             _mark_trail_active(position)
-            # Always report activation — even if stop was already at
-            # breakeven, the trail_active flag is new.
-            if new_stop != old_stop:
-                service.save_account(PAPER_STATE_PATH)
+            # Always persist activation so the marker and the original
+            # risk distance survive a restart, even if the stop was
+            # already at breakeven.
+            service.save_account(PAPER_STATE_PATH)
             return (True, old_stop, new_stop)
 
         new_stop = min(stop, current_price + stop_distance)

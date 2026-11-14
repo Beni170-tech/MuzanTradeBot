@@ -85,6 +85,10 @@ class PaperOrder:
     # the mark has no verified age (for example a legacy saved account), so
     # sizing must not treat that mark as fresh.
     mark_at: Optional[str] = None
+    # Original entry-to-stop distance captured when the position was opened.
+    # Trailing stops use this fixed risk unit instead of recalculating it
+    # from a stop that has already moved. ``None`` marks legacy saved data.
+    initial_risk_distance: Optional[float] = None
     paper: bool = True
     notes: list[str] = field(default_factory=list)
 

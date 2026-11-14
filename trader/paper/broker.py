@@ -154,15 +154,20 @@ class PaperBroker(ExecutionBackend):
         if not validation.ok:
             return None
 
+        entry_price = _coerce_entry_price(trade)
+        stop_loss = float(trade.stop_loss)
+        take_profit = float(trade.take_profit)
+
         try:
             order = PaperOrder(
                 order_id=_make_order_id(trade),
                 symbol=trade.symbol.strip().upper(),
                 side=_map_side(trade.side),
                 quantity=float(trade.position_size),
-                entry_price=_coerce_entry_price(trade),
-                stop_loss=float(trade.stop_loss),
-                take_profit=float(trade.take_profit),
+                entry_price=entry_price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                initial_risk_distance=abs(entry_price - stop_loss),
                 trade=trade,
             )
         except (TypeError, ValueError):

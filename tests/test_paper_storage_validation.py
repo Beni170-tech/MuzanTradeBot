@@ -26,6 +26,7 @@ NUMERIC_ORDER_FIELDS = [
     "exit_price",
     "realized_pnl",
     "unrealized_pnl",
+    "initial_risk_distance",
 ]
 
 
@@ -49,6 +50,7 @@ def _order_dict(**overrides: object) -> dict:
         "unrealized_pnl": 50.0,
         "mark_price": None,
         "mark_at": None,
+        "initial_risk_distance": 10.0,
         "paper": True,
         "notes": ["test note"],
     }
@@ -83,6 +85,7 @@ def _make_order(
     take_profit: float = 104.0,
     realized_pnl: float = 0.0,
     notes: list[str] | None = None,
+    initial_risk_distance: float | None = 10.0,
 ) -> PaperOrder:
     return PaperOrder(
         order_id=order_id,
@@ -95,6 +98,7 @@ def _make_order(
         status=PaperOrderStatus.OPEN,
         realized_pnl=realized_pnl,
         notes=notes if notes is not None else ["test note"],
+        initial_risk_distance=initial_risk_distance,
     )
 
 
@@ -201,7 +205,10 @@ def test_load_orders_rejects_non_finite_numbers(
         load_orders(path)
 
 
-@pytest.mark.parametrize("field", ["quantity", "entry_price", "mark_price", "exit_price"])
+@pytest.mark.parametrize(
+    "field",
+    ["quantity", "entry_price", "mark_price", "exit_price", "initial_risk_distance"],
+)
 @pytest.mark.parametrize("value", [0.0, -1.0])
 def test_load_orders_rejects_non_positive_required_prices(
     tmp_path: Path, field: str, value: float
@@ -436,6 +443,7 @@ def test_valid_account_and_orders_round_trip(tmp_path: Path) -> None:
     assert loaded_order.entry_price == 100.0
     assert loaded_order.stop_loss == 98.0
     assert loaded_order.take_profit == 104.0
+    assert loaded_order.initial_risk_distance == 10.0
     assert loaded_order.notes == ["test note"]
 
 
@@ -451,6 +459,7 @@ def test_legacy_order_without_optional_fields_loads(tmp_path: Path) -> None:
         "unrealized_pnl",
         "mark_price",
         "mark_at",
+        "initial_risk_distance",
         "paper",
         "notes",
     ]:
@@ -461,6 +470,7 @@ def test_legacy_order_without_optional_fields_loads(tmp_path: Path) -> None:
 
     assert order.mark_price is None
     assert order.exit_price is None
+    assert order.initial_risk_distance is None
     assert order.realized_pnl == 0.0
     assert order.unrealized_pnl == 0.0
     assert order.notes == []
