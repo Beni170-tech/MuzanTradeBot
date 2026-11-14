@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -357,20 +359,53 @@ def _dict_to_account(data: dict[str, Any]) -> PaperAccount:
     )
 
 
+def _atomic_write_text(path: Path, payload: str) -> None:
+    """Atomically replace ``path`` with ``payload``.
+
+    The payload is written to a temporary file in the same directory,
+    flushed and fsynced, then moved into place with ``os.replace()``.
+    If writing or replacement fails, the existing file is left untouched
+    and the temporary file is removed.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = -1
+    temp_path: str | None = None
+    try:
+        fd, temp_path = tempfile.mkstemp(
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = -1
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+        temp_path = None
+    finally:
+        if fd != -1:
+            os.close(fd)
+        if temp_path is not None:
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
+
+
 def save_account(account: PaperAccount, path: str | Path) -> None:
-    """Save a PaperAccount to a JSON file.
+    """Save a PaperAccount to a JSON file atomically.
 
     Args:
         account: The PaperAccount to save.
         path: File path to write the JSON to.
     """
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
     data = _account_to_dict(account)
-    # Serialize fully before writing so a non-finite value cannot leave a
-    # truncated account file behind.
+    # Serialize fully before touching the existing file so a non-finite
+    # value cannot leave a truncated account file behind.
     payload = json.dumps(data, indent=2, ensure_ascii=False, allow_nan=False)
-    path.write_text(payload, encoding="utf-8")
+    _atomic_write_text(path, payload)
 
 
 def load_account(path: str | Path) -> PaperAccount:
@@ -400,19 +435,18 @@ def load_account(path: str | Path) -> PaperAccount:
 
 
 def save_orders(orders: list[PaperOrder], path: str | Path) -> None:
-    """Save a list of PaperOrder objects to a JSON file.
+    """Save a list of PaperOrder objects to a JSON file atomically.
 
     Args:
         orders: List of PaperOrder objects to save.
         path: File path to write the JSON to.
     """
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
     data = [_order_to_dict(o) for o in orders]
-    # Serialize fully before writing so a non-finite value cannot leave a
-    # truncated orders file behind.
+    # Serialize fully before touching the existing file so a non-finite
+    # value cannot leave a truncated orders file behind.
     payload = json.dumps(data, indent=2, ensure_ascii=False, allow_nan=False)
-    path.write_text(payload, encoding="utf-8")
+    _atomic_write_text(path, payload)
 
 
 def load_orders(path: str | Path) -> list[PaperOrder]:

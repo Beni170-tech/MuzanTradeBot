@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import trader.paper.storage as storage
 from trader.paper.account import PaperAccount
 from trader.paper.order import PaperOrder, PaperOrderSide, PaperOrderStatus
 from trader.paper.storage import load_account, load_orders, save_account, save_orders
@@ -416,6 +417,141 @@ def test_save_orders_rejects_non_finite_values_without_truncating(
         save_orders([order], path)
 
     assert path.read_text(encoding="utf-8") == "original contents"
+
+
+def _temp_files(directory: Path) -> list[Path]:
+    """Return temporary files left in the target directory."""
+    return [p for p in directory.iterdir() if p.name.endswith(".tmp")]
+
+
+def test_save_account_replaces_file_atomically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "account.json"
+    path.write_text("original contents", encoding="utf-8")
+    account = PaperAccount(initial_balance=1000.0, current_balance=900.0)
+    replacements: list[tuple[Path, Path]] = []
+    real_replace = storage.os.replace
+
+    def checked_replace(src: str | Path, dst: str | Path) -> None:
+        assert Path(src).parent == path.parent
+        assert Path(src).read_text(encoding="utf-8").startswith("{")
+        assert path.read_text(encoding="utf-8") == "original contents"
+        replacements.append((Path(src), Path(dst)))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(storage.os, "replace", checked_replace)
+
+    save_account(account, path)
+
+    assert len(replacements) == 1
+    assert load_account(path).current_balance == 900.0
+    assert _temp_files(tmp_path) == []
+
+
+def test_save_orders_replaces_file_atomically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "orders.json"
+    path.write_text("original contents", encoding="utf-8")
+    replacements: list[tuple[Path, Path]] = []
+    real_replace = storage.os.replace
+
+    def checked_replace(src: str | Path, dst: str | Path) -> None:
+        assert Path(src).parent == path.parent
+        assert path.read_text(encoding="utf-8") == "original contents"
+        replacements.append((Path(src), Path(dst)))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(storage.os, "replace", checked_replace)
+
+    save_orders([_make_order()], path)
+
+    assert len(replacements) == 1
+    assert load_orders(path)[0].order_id == "ORD-1"
+    assert _temp_files(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "saver, filename",
+    [
+        pytest.param(
+            lambda path: save_account(
+                PaperAccount(
+                    initial_balance=1000.0, current_balance=900.0
+                ),
+                path,
+            ),
+            "account.json",
+            id="account",
+        ),
+        pytest.param(
+            lambda path: save_orders([_make_order()], path),
+            "orders.json",
+            id="orders",
+        ),
+    ],
+)
+def test_save_preserves_previous_data_on_write_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    saver,
+    filename: str,
+) -> None:
+    path = tmp_path / filename
+    path.write_text("previous valid data", encoding="utf-8")
+
+    def failing_fsync(fd: int) -> None:
+        raise OSError("simulated disk-full write failure")
+
+    monkeypatch.setattr(storage.os, "fsync", failing_fsync)
+
+    with pytest.raises(OSError, match="simulated disk-full"):
+        saver(path)
+
+    assert path.read_text(encoding="utf-8") == "previous valid data"
+    assert _temp_files(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    "saver, filename",
+    [
+        pytest.param(
+            lambda path: save_account(
+                PaperAccount(
+                    initial_balance=1000.0, current_balance=900.0
+                ),
+                path,
+            ),
+            "account.json",
+            id="account",
+        ),
+        pytest.param(
+            lambda path: save_orders([_make_order()], path),
+            "orders.json",
+            id="orders",
+        ),
+    ],
+)
+def test_save_preserves_previous_data_on_replacement_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    saver,
+    filename: str,
+) -> None:
+    path = tmp_path / filename
+    path.write_text("previous valid data", encoding="utf-8")
+
+    def failing_replace(src: str | Path, dst: str | Path) -> None:
+        raise OSError("simulated replacement failure")
+
+    monkeypatch.setattr(storage.os, "replace", failing_replace)
+
+    with pytest.raises(OSError, match="simulated replacement failure"):
+        saver(path)
+
+    assert path.read_text(encoding="utf-8") == "previous valid data"
+    assert _temp_files(tmp_path) == []
 
 
 def test_valid_account_and_orders_round_trip(tmp_path: Path) -> None:
