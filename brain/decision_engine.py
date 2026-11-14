@@ -6,6 +6,8 @@ decision engine decides whether a trade signal is strong enough to
 execute, prioritizing capital preservation above all else.
 """
 
+import math
+
 
 def make_decision(analysis: dict) -> str:
     """Decide what action to take based on market analysis.
@@ -26,7 +28,15 @@ def make_decision(analysis: dict) -> str:
 
     if not isinstance(signal, str) or not isinstance(trend, str):
         return "WAIT"
-    if not isinstance(confidence, (int, float)):
+    if isinstance(confidence, bool) or not isinstance(
+        confidence, (int, float)
+    ):
+        return "WAIT"
+    # Compare against the valid range before math.isfinite(): very large
+    # integers are out of range and would otherwise raise OverflowError.
+    if confidence < 0 or confidence > 100:
+        return "WAIT"
+    if not math.isfinite(confidence):
         return "WAIT"
 
     if (
