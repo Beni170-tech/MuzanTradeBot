@@ -72,6 +72,29 @@ def _build_paper_monitor() -> PaperPositionMonitor | None:
     return monitor
 
 
+async def _start_paper_monitor(application) -> None:
+    """Start the paper monitor from PTB's async post_init hook.
+
+    PTB calls this on the polling event loop, so the monitor task is
+    created on the same loop that serves Telegram updates. If startup
+    fails, clear any partial running state before re-raising so the bot
+    does not continue with a monitor that appears alive but has no task.
+    """
+    monitor = _paper_monitor
+    if monitor is None:
+        return
+    try:
+        monitor.start()
+    except Exception:
+        monitor.stop()
+        logger.exception(
+            "Paper position monitor failed to start; aborting startup "
+            "rather than running without background position protection."
+        )
+        raise
+    logger.info("Background paper position monitor started.")
+
+
 async def _shutdown_paper_monitor(application) -> None:
     """Cancel and await the paper monitor from PTB's post_shutdown hook.
 
@@ -97,16 +120,16 @@ def run_bot() -> None:
 
     app = build_application()
 
+    # PTB calls post_init on the polling event loop. Starting the monitor
+    # there binds its task to the same loop that serves Telegram updates.
+    app.post_init = _start_paper_monitor
+
     # PTB runs this hook on the still-open polling loop immediately before
     # it closes that loop, so the monitor can be cancelled and awaited.
     app.post_shutdown = _shutdown_paper_monitor
 
-    # Start the background position monitor when configured.
-    # The monitor runs as an asyncio task on the polling loop.
+    # Build the monitor when configured; it is started by post_init.
     _paper_monitor = _build_paper_monitor()
-    if _paper_monitor is not None:
-        _paper_monitor.start()
-        logger.info("Background paper position monitor started.")
 
     print("Bot application created.")
     print("Starting polling...")

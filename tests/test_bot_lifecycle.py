@@ -1,8 +1,9 @@
 """Lifecycle tests for Telegram bot and paper position monitor shutdown.
 
 These tests exercise the real run_bot() path with a fake Application that
-mimics python-telegram-bot's ordering: post_shutdown is awaited on the
-still-open polling loop, and the loop is closed afterwards.
+mimics python-telegram-bot's ordering: post_init is awaited on the polling
+loop, then post_shutdown is awaited on that same still-open loop before the
+loop is closed afterwards.
 """
 
 from __future__ import annotations
@@ -36,22 +37,32 @@ class _FakeApplication:
     """Stand-in for PTB Application with the real shutdown ordering."""
 
     def __init__(self) -> None:
+        self.post_init = None
         self.post_shutdown = None
         self.loop = None
         self.task = None
         self.task_done_at_shutdown = False
 
     def run_polling(self, **kwargs) -> None:
-        assert bot._paper_monitor is not None
-        self.loop = bot._paper_monitor._task.get_loop()
-        self.loop.run_until_complete(asyncio.sleep(0.01))
-        self.task = bot._paper_monitor._task
+        assert self.post_init is not None
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        try:
+            # PTB runs post_init on the polling loop, before updates.
+            self.loop.run_until_complete(self.post_init(self))
+            assert bot._paper_monitor is not None
+            self.task = bot._paper_monitor._task
+            assert self.task is not None
+            assert self.task.get_loop() is self.loop
+            self.loop.run_until_complete(asyncio.sleep(0.01))
 
-        assert self.post_shutdown is not None
-        self.loop.run_until_complete(self.post_shutdown(self))
+            assert self.post_shutdown is not None
+            self.loop.run_until_complete(self.post_shutdown(self))
 
-        self.task_done_at_shutdown = self.task.done()
-        self.loop.close()
+            self.task_done_at_shutdown = self.task.done()
+        finally:
+            self.loop.close()
+            asyncio.set_event_loop(None)
 
 
 def test_run_bot_awaits_monitor_before_closing_loop(monkeypatch):

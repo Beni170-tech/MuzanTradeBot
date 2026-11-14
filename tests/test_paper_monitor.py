@@ -768,56 +768,134 @@ class TestTelegramCompatibility:
             result = _build_paper_monitor()
             assert result is None
 
-    def test_run_bot_starts_monitor_task(self):
-        """Verifying that run_bot() starts the monitor task when configured."""
+    @pytest.mark.asyncio
+    async def test_post_init_starts_monitor_on_running_loop(self, monkeypatch):
+        """post_init must bind the task to the actual polling loop."""
+        import telegram_bot.bot as bot_module
+
+        service = MagicMock()
+        service.open_positions.return_value = []
+        monitor = PaperPositionMonitor(
+            service, _make_alerts(), interval_seconds=10.0
+        )
+        monkeypatch.setattr(bot_module, "_paper_monitor", monitor)
+
+        await bot_module._start_paper_monitor(MagicMock())
+
+        assert monitor.is_running is True
+        assert monitor._task is not None
+        assert monitor._task.get_loop() is asyncio.get_running_loop()
+
+        await monitor.aclose()
+
+    @pytest.mark.asyncio
+    async def test_post_init_task_actually_runs_a_cycle(self, monkeypatch):
+        """The task created by post_init must execute, not just exist."""
+        import telegram_bot.bot as bot_module
+
+        service = MagicMock()
+        service.open_positions.return_value = []
+        monitor = PaperPositionMonitor(
+            service, _make_alerts(), interval_seconds=10.0
+        )
+        monkeypatch.setattr(bot_module, "_paper_monitor", monitor)
+
+        await bot_module._start_paper_monitor(MagicMock())
+
+        for _ in range(100):
+            if service.open_positions.called:
+                break
+            await asyncio.sleep(0.01)
+
+        assert service.open_positions.called is True
+
+        await monitor.aclose()
+
+    @pytest.mark.asyncio
+    async def test_post_init_duplicate_start_keeps_same_task(self, monkeypatch):
+        """Calling post_init twice must not create a second task."""
+        import telegram_bot.bot as bot_module
+
+        service = MagicMock()
+        service.open_positions.return_value = []
+        monitor = PaperPositionMonitor(
+            service, _make_alerts(), interval_seconds=10.0
+        )
+        monkeypatch.setattr(bot_module, "_paper_monitor", monitor)
+
+        await bot_module._start_paper_monitor(MagicMock())
+        first_task = monitor._task
+        await bot_module._start_paper_monitor(MagicMock())
+
+        assert monitor._task is first_task
+        assert monitor.is_running is True
+
+        await monitor.aclose()
+
+    @pytest.mark.asyncio
+    async def test_post_init_shutdown_closes_started_task(self, monkeypatch):
+        """The existing post_shutdown hook must await the post_init task."""
+        import telegram_bot.bot as bot_module
+
+        service = MagicMock()
+        service.open_positions.return_value = []
+        monitor = PaperPositionMonitor(
+            service, _make_alerts(), interval_seconds=10.0
+        )
+        monkeypatch.setattr(bot_module, "_paper_monitor", monitor)
+
+        await bot_module._start_paper_monitor(MagicMock())
+        task = monitor._task
+
+        await bot_module._shutdown_paper_monitor(MagicMock())
+
+        assert task.done() is True
+        assert monitor._task is None
+        assert monitor.is_running is False
+
+    @pytest.mark.asyncio
+    async def test_post_init_start_failure_clears_running_state(
+        self, monkeypatch
+    ):
+        """A failed start must not leave the monitor falsely running."""
+        import telegram_bot.bot as bot_module
+
+        monitor = PaperPositionMonitor(
+            MagicMock(), _make_alerts(), interval_seconds=10.0
+        )
+        monkeypatch.setattr(bot_module, "_paper_monitor", monitor)
+
+        def failing_start():
+            monitor._running = True
+            raise RuntimeError("task creation failed")
+
+        monkeypatch.setattr(monitor, "start", failing_start)
+
+        with pytest.raises(RuntimeError, match="task creation failed"):
+            await bot_module._start_paper_monitor(MagicMock())
+
+        assert monitor.is_running is False
+        assert monitor._task is None
+
+    def test_run_bot_registers_post_init_and_does_not_start_sync(self):
+        """run_bot must register startup and leave starting to post_init."""
         with patch("telegram_bot.bot.build_application") as mock_build, \
              patch("telegram_bot.bot._build_paper_monitor") as mock_build_monitor, \
-             patch("builtins.print"), \
-             patch("asyncio.run") as mock_asyncio_run:
-            mock_app = MagicMock()
-            mock_build.return_value = mock_app
-            mock_monitor = MagicMock()
-            mock_build_monitor.return_value = mock_monitor
+             patch("builtins.print"):
+            app = MagicMock()
+            mock_build.return_value = app
+            monitor = MagicMock()
+            mock_build_monitor.return_value = monitor
 
-            # Simulate what run_bot does: create an async task for the monitor
-            mock_monitor._running = True
-            mock_task = MagicMock()
-            mock_monitor._task = mock_task
+            from telegram_bot.bot import run_bot, _start_paper_monitor, _shutdown_paper_monitor
 
-            with patch("telegram_bot.bot.settings") as mock_settings:
-                mock_settings.TELEGRAM_BOT_TOKEN = "dummy"
-                from telegram_bot.bot import run_bot
+            run_bot()
 
-                # We can't actually run run_bot() because it calls asyncio.run
-                # which would interfere with pytest-asyncio. Instead, verify
-                # the integration by checking that the monitor is properly
-                # configured.
-                assert mock_monitor._running is True
-                assert mock_monitor._task is mock_task
-
-    def test_run_bot_stops_monitor_on_shutdown(self):
-        """Verifying that run_bot() stops the monitor in the finally block."""
-        with patch("telegram_bot.bot.build_application") as mock_build, \
-             patch("telegram_bot.bot._build_paper_monitor") as mock_build_monitor, \
-             patch("builtins.print"), \
-             patch("asyncio.run") as mock_asyncio_run:
-            mock_app = MagicMock()
-            mock_build.return_value = mock_app
-            mock_monitor = MagicMock()
-            mock_build_monitor.return_value = mock_monitor
-
-            mock_task = AsyncMock()
-            mock_monitor._task = mock_task
-            mock_monitor._running = True
-
-            with patch("telegram_bot.bot.settings") as mock_settings:
-                mock_settings.TELEGRAM_BOT_TOKEN = "dummy"
-                from telegram_bot.bot import run_bot
-
-                # Verify the integration pattern: monitor task exists and
-                # would be cancelled on shutdown
-                assert mock_monitor._task is mock_task
-                assert mock_monitor._running is True
+            assert app.post_init is _start_paper_monitor
+            assert app.post_shutdown is _shutdown_paper_monitor
+            monitor.start.assert_not_called()
+            app.run_polling.assert_called_once_with(drop_pending_updates=True)
+            monitor.stop.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

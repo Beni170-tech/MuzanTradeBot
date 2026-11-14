@@ -154,10 +154,11 @@ class PaperPositionMonitor:
         This method is safe to call multiple times — duplicate starts
         are protected. The task is created in the current event loop.
 
-        Note: When the monitor is managed by the Telegram bot, the task
-        is created directly in the bot's async context rather than via
-        this method, so that the task is properly attached to the running
-        event loop.
+        Note: When the monitor is managed by the Telegram bot, this method
+        is called from PTB's async ``post_init`` hook, so the task is
+        created on the polling event loop. The no-running-loop fallback
+        only creates a loop for synchronous callers and tests; that loop
+        is not run automatically, so the task does not execute by itself.
         """
         if self._running:
             logger.info(
