@@ -382,6 +382,16 @@ class PaperPositionMonitor:
                 price,
             )
             return None
+        try:
+            price = float(price)
+        except (OverflowError, ValueError):
+            logger.warning(
+                "Market price for %s is invalid (%r); skipping this "
+                "position for this cycle.",
+                symbol,
+                price,
+            )
+            return None
         if not math.isfinite(price) or price <= 0:
             logger.warning(
                 "Market price for %s is invalid (%r); skipping this "
@@ -391,7 +401,7 @@ class PaperPositionMonitor:
             )
             return None
 
-        return float(price)
+        return price
 
     async def _monitor_position(self, position: "PaperOrder") -> None:
         """Monitor a single open position for SL/TP and trailing-stop.

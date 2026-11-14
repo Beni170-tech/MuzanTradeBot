@@ -255,7 +255,7 @@ async def test_failed_price_request_does_not_close_position(
 
 @pytest.mark.parametrize(
     "bad_price",
-    [0, -5.0, float("nan"), float("inf"), "100", True, None],
+    [0, -5.0, float("nan"), float("inf"), "100", True, None, 10**400],
 )
 @pytest.mark.asyncio
 async def test_invalid_or_missing_price_does_not_use_entry_price(
