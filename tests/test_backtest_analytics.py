@@ -83,6 +83,13 @@ def test_long_profitable_trade_metrics():
         ending_equity=1020.0,
         max_drawdown=0.0,
         max_drawdown_percent=0.0,
+        total_gross_pnl=20.0,
+        net_profit=20.0,
+        net_loss=0.0,
+        net_profit_factor=None,
+        total_fees=0.0,
+        total_slippage_cost=0.0,
+        total_costs=0.0,
     )
 
 
@@ -269,6 +276,13 @@ def test_empty_trade_list_returns_zero_metrics():
         ending_equity=INITIAL_BALANCE,
         max_drawdown=0.0,
         max_drawdown_percent=0.0,
+        total_gross_pnl=0.0,
+        net_profit=0.0,
+        net_loss=0.0,
+        net_profit_factor=None,
+        total_fees=0.0,
+        total_slippage_cost=0.0,
+        total_costs=0.0,
     )
 
 

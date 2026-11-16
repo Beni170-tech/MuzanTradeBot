@@ -8,6 +8,11 @@ paper accounts, live execution, the network, or the filesystem.
 from dataclasses import dataclass, replace
 from datetime import datetime
 
+from backtest.costs import (
+    TradeCostBreakdown,
+    TradingCostModel,
+    calculate_trade_costs,
+)
 from backtest.execution import BacktestPosition, simulate_exit
 from backtest.replay import HistoricalBar, replay_signals
 from risk.risk_manager import validate_trade
@@ -34,6 +39,7 @@ class HistoricalTrade:
     exit_timestamp: datetime | None = None
     exit_price: float | None = None
     exit_status: PaperOrderStatus | None = None
+    cost_breakdown: TradeCostBreakdown | None = None
 
 
 def _analysis_from_record(symbol: str, record, entry_price: float) -> dict:
@@ -51,6 +57,7 @@ def simulate_trades(
     symbol: str,
     bars: list[HistoricalBar] | tuple[HistoricalBar, ...],
     profile: RiskProfile,
+    cost_model: TradingCostModel | None = None,
 ) -> list[HistoricalTrade]:
     """Replay signals and simulate non-overlapping historical trades.
 
@@ -64,6 +71,10 @@ def simulate_trades(
         symbol: Symbol associated with the whole bar series.
         bars: Chronological HistoricalBar values, oldest first.
         profile: Risk profile used for validation, sizing, and exits.
+        cost_model: Optional explicit fee/slippage assumptions. When
+            supplied, completed trades carry a full cost breakdown. The
+            underlying entry/exit quote prices and exit rules remain
+            unchanged. None means no cost calculation is attached.
 
     Returns:
         HistoricalTrade records in chronological order. The final record
@@ -77,6 +88,8 @@ def simulate_trades(
         raise ValueError("symbol must be a non-empty string")
     if not isinstance(profile, RiskProfile):
         raise TypeError("profile must be a RiskProfile")
+    if cost_model is not None and not isinstance(cost_model, TradingCostModel):
+        raise TypeError("cost_model must be a TradingCostModel or None")
 
     normalized_symbol = symbol.strip().upper()
 
@@ -134,6 +147,15 @@ def simulate_trades(
         )
         simulation = simulate_exit(position, bars[entry_index + 1:])
         exit_event = simulation.exit_event
+        cost_breakdown = None
+        if cost_model is not None and exit_event is not None:
+            cost_breakdown = calculate_trade_costs(
+                side=trade.side,
+                entry_price=float(trade.price),
+                exit_price=exit_event.price,
+                quantity=trade.position_size,
+                cost_model=cost_model,
+            )
 
         trades.append(
             HistoricalTrade(
@@ -155,6 +177,7 @@ def simulate_trades(
                 exit_status=(
                     exit_event.status if exit_event is not None else None
                 ),
+                cost_breakdown=cost_breakdown,
             )
         )
 

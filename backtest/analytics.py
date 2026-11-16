@@ -3,12 +3,22 @@
 Only completed HistoricalTrade records contribute to realized PnL, win
 rate, ending equity, and drawdown. This module performs no I/O and does
 not change position sizing or trade execution.
+
+Gross PnL uses the recorded historical quote prices. Net PnL applies the
+caller-supplied fee and adverse-slippage assumptions to both entry and
+exit. Costs default to exactly zero, preserving legacy behavior.
 """
 
 from dataclasses import dataclass
 from datetime import datetime
 import math
 
+from backtest.costs import (
+    TradeCostBreakdown,
+    TradingCostModel,
+    ZERO_COSTS,
+    calculate_trade_costs,
+)
 from backtest.trades import HistoricalTrade
 from trader.paper.order import PaperOrderStatus
 
@@ -22,7 +32,12 @@ _CLOSED_STATUSES = {
 
 @dataclass(frozen=True, slots=True)
 class BacktestMetrics:
-    """Aggregate metrics for a historical backtest trade set."""
+    """Aggregate metrics for a historical backtest trade set.
+
+    ``gross_profit`` and ``gross_loss`` describe quote-price outcomes.
+    ``net_profit``, ``net_loss``, ``total_realized_pnl``, equity, and
+    drawdown use net PnL after the explicit ``cost_model`` assumptions.
+    """
 
     total_trades: int
     open_trades: int
@@ -37,6 +52,14 @@ class BacktestMetrics:
     ending_equity: float
     max_drawdown: float
     max_drawdown_percent: float
+    total_gross_pnl: float = 0.0
+    net_profit: float = 0.0
+    net_loss: float = 0.0
+    net_profit_factor: float | None = None
+    total_fees: float = 0.0
+    total_slippage_cost: float = 0.0
+    total_costs: float = 0.0
+    cost_model: TradingCostModel = ZERO_COSTS
 
 
 def _is_finite_positive(value) -> bool:
@@ -79,6 +102,11 @@ def _validate_trade(trade) -> bool:
                 f"trade.{field_name} must be a finite positive number"
             )
 
+    if trade.cost_breakdown is not None and not isinstance(
+        trade.cost_breakdown, TradeCostBreakdown
+    ):
+        raise TypeError("trade.cost_breakdown must be a TradeCostBreakdown")
+
     exit_fields = (
         trade.exit_timestamp,
         trade.exit_price,
@@ -113,53 +141,110 @@ def _validate_trade(trade) -> bool:
     return False
 
 
-def _realized_pnl(trade: HistoricalTrade) -> float:
-    side = trade.side.strip().upper()
-    entry = float(trade.entry_price)
-    exit_price = float(trade.exit_price)
-    quantity = float(trade.quantity)
-    if side == "LONG":
-        pnl = (exit_price - entry) * quantity
-    else:
-        pnl = (entry - exit_price) * quantity
-    if not math.isfinite(pnl):
-        raise ValueError("trade realized PnL is not finite")
-    return pnl
+def _resolve_cost_model(
+    completed_trades: list[HistoricalTrade],
+    cost_model: TradingCostModel | None,
+) -> TradingCostModel:
+    """Resolve explicit costs, or infer one consistent model from trades."""
+    if cost_model is not None:
+        if not isinstance(cost_model, TradingCostModel):
+            raise TypeError("cost_model must be a TradingCostModel or None")
+        return cost_model
+
+    models = set()
+    missing = 0
+    for trade in completed_trades:
+        breakdown = trade.cost_breakdown
+        if breakdown is None:
+            missing += 1
+            continue
+        if not isinstance(breakdown.cost_model, TradingCostModel):
+            raise TypeError(
+                "trade cost breakdowns must contain a TradingCostModel"
+            )
+        models.add(breakdown.cost_model)
+
+    if not models:
+        return ZERO_COSTS
+    if missing:
+        raise ValueError(
+            "completed trades must all include cost breakdowns or none"
+        )
+    if len(models) != 1:
+        raise ValueError("completed trades must use a single cost model")
+    return next(iter(models))
+
+
+def _sum(values, overflow_message: str) -> float:
+    try:
+        total = math.fsum(values)
+    except OverflowError as exc:
+        raise ValueError(overflow_message) from exc
+    if not math.isfinite(total):
+        raise ValueError(overflow_message)
+    return total
+
+
+def _profit_factor(profit: float, loss: float, name: str) -> float | None:
+    try:
+        factor = profit / loss if loss > 0.0 else None
+    except OverflowError as exc:
+        raise ValueError(f"{name} is not finite") from exc
+    if factor is not None and not math.isfinite(factor):
+        raise ValueError(f"{name} is not finite")
+    return factor
 
 
 def compute_backtest_metrics(
     trades: list[HistoricalTrade] | tuple[HistoricalTrade, ...],
     initial_balance: float,
+    cost_model: TradingCostModel | None = None,
 ) -> BacktestMetrics:
-    """Compute realized performance metrics from historical trades.
+    """Compute realized gross and net performance metrics.
 
     Open trades are those with all three exit fields set to None. They are
     counted in ``total_trades`` and ``open_trades`` but excluded from all
     realized calculations. Completed trades are ordered by exit timestamp;
     equal timestamps preserve their original input order.
 
+    Costs are resolved in this order:
+
+    1. An explicit ``cost_model`` argument is used.
+    2. Otherwise, completed trades carrying cost breakdowns must all use
+       one identical model, which is applied again to their quote prices.
+    3. Otherwise, the exact zero-cost default is used.
+
+    Wins, losses, breakeven, win rate, net profit factor, ending equity,
+    and drawdown use net PnL. Gross profit and gross loss remain available
+    for comparison with quote-price outcomes.
+
     Args:
         trades: HistoricalTrade records, which are not modified.
         initial_balance: Starting equity; must be finite and positive.
+        cost_model: Optional explicit fee/slippage assumptions.
 
     Returns:
         Immutable metrics. Win rate and max drawdown are percentages.
-        Profit factor is None when there is no gross loss.
+        Profit factors are None when there is no corresponding loss.
+        The exact assumptions are exposed in ``cost_model``.
 
     Raises:
-        TypeError: If trades are not a list/tuple of HistoricalTrade, or a
-            timestamp/status has the wrong type.
+        TypeError: If trades are not a list/tuple of HistoricalTrade, a
+            timestamp/status has the wrong type, or a cost model is not a
+            TradingCostModel.
         ValueError: If the initial balance is invalid, a trade field is
-            invalid, exit fields are partially populated, or numeric
-            calculations overflow.
+            invalid, exit fields are partially populated, cost models are
+            inconsistent, or numeric calculations overflow.
     """
     if not isinstance(trades, (list, tuple)):
         raise TypeError("trades must be a list or tuple of HistoricalTrade")
     if not _is_finite_positive(initial_balance):
         raise ValueError("initial_balance must be a finite positive number")
+    if cost_model is not None and not isinstance(cost_model, TradingCostModel):
+        raise TypeError("cost_model must be a TradingCostModel or None")
 
     balance = float(initial_balance)
-    completed = []
+    completed_trades = []
     open_trades = 0
 
     for input_index, trade in enumerate(trades):
@@ -167,9 +252,22 @@ def compute_backtest_metrics(
         if is_open:
             open_trades += 1
             continue
-        completed.append(
-            (trade.exit_timestamp, input_index, _realized_pnl(trade))
+        completed_trades.append((input_index, trade))
+
+    resolved_cost_model = _resolve_cost_model(
+        [trade for _, trade in completed_trades],
+        cost_model,
+    )
+    completed = []
+    for input_index, trade in completed_trades:
+        breakdown = calculate_trade_costs(
+            side=trade.side,
+            entry_price=trade.entry_price,
+            exit_price=trade.exit_price,
+            quantity=trade.quantity,
+            cost_model=resolved_cost_model,
         )
+        completed.append((trade.exit_timestamp, input_index, breakdown))
 
     try:
         completed.sort(key=lambda item: (item[0], item[1]))
@@ -178,31 +276,54 @@ def compute_backtest_metrics(
             "exit timestamps must be mutually comparable"
         ) from exc
 
-    pnl_values = [pnl for _, _, pnl in completed]
-    wins = sum(1 for pnl in pnl_values if pnl > 0)
-    losses = sum(1 for pnl in pnl_values if pnl < 0)
-    breakeven = sum(1 for pnl in pnl_values if pnl == 0)
+    gross_values = [breakdown.gross_pnl for _, _, breakdown in completed]
+    net_values = [breakdown.net_pnl for _, _, breakdown in completed]
+    wins = sum(1 for pnl in net_values if pnl > 0)
+    losses = sum(1 for pnl in net_values if pnl < 0)
+    breakeven = sum(1 for pnl in net_values if pnl == 0)
 
-    try:
-        gross_profit = math.fsum(pnl for pnl in pnl_values if pnl > 0)
-        gross_loss = abs(math.fsum(pnl for pnl in pnl_values if pnl < 0))
-        total_realized_pnl = math.fsum(pnl_values)
-    except OverflowError as exc:
-        raise ValueError("aggregate PnL overflowed") from exc
-    if (
-        not math.isfinite(gross_profit)
-        or not math.isfinite(gross_loss)
-        or not math.isfinite(total_realized_pnl)
-    ):
-        raise ValueError("aggregate PnL is not finite")
+    gross_profit = _sum(
+        (pnl for pnl in gross_values if pnl > 0),
+        "aggregate PnL overflowed",
+    )
+    gross_loss = abs(
+        _sum(
+            (pnl for pnl in gross_values if pnl < 0),
+            "aggregate PnL overflowed",
+        )
+    )
+    net_profit = _sum(
+        (pnl for pnl in net_values if pnl > 0),
+        "aggregate PnL overflowed",
+    )
+    net_loss = abs(
+        _sum(
+            (pnl for pnl in net_values if pnl < 0),
+            "aggregate PnL overflowed",
+        )
+    )
+    total_gross_pnl = _sum(gross_values, "aggregate PnL overflowed")
+    total_realized_pnl = _sum(net_values, "aggregate PnL overflowed")
+    total_fees = _sum(
+        (breakdown.total_fees for _, _, breakdown in completed),
+        "aggregate costs overflowed",
+    )
+    total_slippage_cost = _sum(
+        (breakdown.slippage_cost for _, _, breakdown in completed),
+        "aggregate costs overflowed",
+    )
+    total_costs = _sum(
+        (breakdown.total_costs for _, _, breakdown in completed),
+        "aggregate costs overflowed",
+    )
 
     equity = balance
     peak = equity
     max_drawdown = 0.0
     max_drawdown_percent = 0.0
 
-    for _, _, pnl in completed:
-        equity += pnl
+    for _, _, breakdown in completed:
+        equity += breakdown.net_pnl
         if not math.isfinite(equity):
             raise ValueError("equity calculation is not finite")
 
@@ -223,14 +344,16 @@ def compute_backtest_metrics(
     win_rate = (
         (wins / completed_count) * 100.0 if completed_count > 0 else 0.0
     )
-    try:
-        profit_factor = (
-            gross_profit / gross_loss if gross_loss > 0.0 else None
-        )
-    except OverflowError as exc:
-        raise ValueError("profit factor is not finite") from exc
-    if profit_factor is not None and not math.isfinite(profit_factor):
-        raise ValueError("profit factor is not finite")
+    profit_factor = _profit_factor(
+        gross_profit,
+        gross_loss,
+        "profit factor",
+    )
+    net_profit_factor = _profit_factor(
+        net_profit,
+        net_loss,
+        "net profit factor",
+    )
 
     return BacktestMetrics(
         total_trades=len(trades),
@@ -246,4 +369,12 @@ def compute_backtest_metrics(
         ending_equity=equity,
         max_drawdown=max_drawdown,
         max_drawdown_percent=max_drawdown_percent,
+        total_gross_pnl=total_gross_pnl,
+        net_profit=net_profit,
+        net_loss=net_loss,
+        net_profit_factor=net_profit_factor,
+        total_fees=total_fees,
+        total_slippage_cost=total_slippage_cost,
+        total_costs=total_costs,
+        cost_model=resolved_cost_model,
     )
