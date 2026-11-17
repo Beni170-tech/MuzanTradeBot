@@ -5,8 +5,10 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+import backtest.replay as replay_module
 from backtest.replay import HistoricalBar, SignalRecord, replay_signals
 from market.indicators import MIN_CANDLES
+from strategy.parameters import DEFAULT_STRATEGY_PARAMETERS, StrategyParameters
 
 START = datetime(2024, 1, 1, tzinfo=timezone.utc)
 
@@ -157,3 +159,74 @@ def test_incomparable_timestamps_are_rejected():
 
     with pytest.raises(ValueError, match="mutually comparable"):
         replay_signals(bars)
+
+
+def test_default_parameters_match_omitted_behavior():
+    bars = _bars(_rising(n=80))
+
+    assert replay_signals(bars) == replay_signals(
+        bars,
+        parameters=DEFAULT_STRATEGY_PARAMETERS,
+    )
+
+
+def test_custom_min_candles_controls_first_eligible_bar():
+    custom = StrategyParameters(
+        fast_ema=5,
+        slow_ema=10,
+        rsi_period=5,
+        macd_fast=5,
+        macd_slow=10,
+        macd_signal=3,
+        volume_period=5,
+        min_candles=12,
+    )
+    bars = _bars(_rising(n=15))
+
+    records = replay_signals(bars, parameters=custom)
+
+    assert len(records) == 4
+    assert records[0].timestamp == bars[11].timestamp
+
+
+def test_parameters_are_forwarded_to_analysis_and_decision(monkeypatch):
+    custom = StrategyParameters(
+        fast_ema=5,
+        slow_ema=10,
+        rsi_period=5,
+        macd_fast=5,
+        macd_slow=10,
+        macd_signal=3,
+        volume_period=5,
+        min_candles=12,
+    )
+    calls = []
+
+    def fake_compute(closes, volumes=None, *, parameters=None):
+        calls.append(parameters)
+        return {
+            "trend": "Bullish",
+            "signal": "BUY",
+            "confidence": 80,
+            "indicators": {},
+        }
+
+    def fake_decision(analysis, *, parameters=None):
+        calls.append(parameters)
+        return "WAIT"
+
+    monkeypatch.setattr(replay_module, "compute_analysis", fake_compute)
+    monkeypatch.setattr(replay_module, "make_decision", fake_decision)
+
+    records = replay_signals(
+        _bars(_rising(n=13)),
+        parameters=custom,
+    )
+
+    assert len(records) == 2
+    assert all(parameters is custom for parameters in calls)
+
+
+def test_invalid_parameters_type_is_rejected():
+    with pytest.raises(TypeError, match="parameters"):
+        replay_signals(_bars([100.0]), parameters=object())

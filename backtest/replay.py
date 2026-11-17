@@ -10,7 +10,11 @@ from datetime import datetime
 import math
 
 from brain.decision_engine import make_decision
-from market.indicators import MIN_CANDLES, compute_analysis
+from market.indicators import compute_analysis
+from strategy.parameters import (
+    DEFAULT_STRATEGY_PARAMETERS,
+    StrategyParameters,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,42 +84,54 @@ def _validate_bars(bars) -> None:
         previous_timestamp = bar.timestamp
 
 
-def replay_signals(bars) -> list[SignalRecord]:
+def replay_signals(bars, *, parameters=None) -> list[SignalRecord]:
     """Replay historical bars chronologically and record strategy decisions.
 
     Args:
         bars: An ordered list or tuple of HistoricalBar values, oldest first.
             The input is never sorted or modified.
+        parameters: Optional immutable strategy configuration. ``None``
+            uses the existing defaults exactly. Its ``min_candles`` value
+            controls the first eligible replay bar.
 
     Returns:
-        One SignalRecord per bar with at least MIN_CANDLES of history,
-        starting with the MIN_CANDLES-th bar. Returns an empty list when
-        fewer than MIN_CANDLES bars are supplied.
+        One SignalRecord per bar with at least the configured minimum
+        history, starting with that many bars. Returns an empty list when
+        fewer bars are supplied.
 
     Raises:
-        TypeError: If ``bars`` is not a list/tuple or contains a non-bar, or
-            if a bar timestamp is not a datetime.
-        ValueError: If a bar has an invalid close/volume, or timestamps are
-            not strictly increasing in the supplied order.
+        TypeError: If ``bars`` is not a list/tuple or contains a non-bar, a
+            bar timestamp is not a datetime, or ``parameters`` has the
+            wrong type.
+        ValueError: If a bar has an invalid close/volume, timestamps are
+            not strictly increasing in the supplied order, or the strategy
+            configuration is invalid.
     """
+    if parameters is None:
+        parameters = DEFAULT_STRATEGY_PARAMETERS
+    elif not isinstance(parameters, StrategyParameters):
+        raise TypeError("parameters must be a StrategyParameters or None")
+
     if not isinstance(bars, (list, tuple)):
         raise TypeError("bars must be a list or tuple of HistoricalBar values")
 
     _validate_bars(bars)
 
-    if len(bars) < MIN_CANDLES:
+    minimum_candles = parameters.min_candles
+    if len(bars) < minimum_candles:
         return []
 
     closes = [bar.close for bar in bars]
     volumes = [bar.volume for bar in bars]
     records = []
 
-    for index in range(MIN_CANDLES - 1, len(bars)):
+    for index in range(minimum_candles - 1, len(bars)):
         analysis = compute_analysis(
             closes[: index + 1],
             volumes[: index + 1],
+            parameters=parameters,
         )
-        decision = make_decision(analysis)
+        decision = make_decision(analysis, parameters=parameters)
         records.append(
             SignalRecord(
                 timestamp=bars[index].timestamp,

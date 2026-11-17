@@ -50,7 +50,7 @@ def _patch_replay(monkeypatch, bars, decisions):
     monkeypatch.setattr(
         trades_module,
         "replay_signals",
-        lambda received_bars: records,
+        lambda received_bars, *, parameters=None: records,
     )
 
 

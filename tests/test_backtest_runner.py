@@ -17,6 +17,7 @@ from backtest.runner import (
 from backtest.trades import HistoricalTrade
 from market.indicators import MIN_CANDLES
 from risk.risk_profile import RiskProfile
+from strategy.parameters import DEFAULT_STRATEGY_PARAMETERS, StrategyParameters
 from trader.paper.order import PaperOrderStatus
 
 START = datetime(2024, 1, 1, tzinfo=timezone.utc)
@@ -104,7 +105,9 @@ def _open_trade():
 def _patch_simulation(monkeypatch, trades):
     calls = []
 
-    def fake_simulate(symbol, bars, profile, cost_model=None):
+    def fake_simulate(
+        symbol, bars, profile, cost_model=None, *, parameters=None
+    ):
         calls.append((symbol, bars, profile, cost_model))
         return list(trades)
 
@@ -152,7 +155,7 @@ def test_successful_run_uses_actual_replay_and_execution_pipeline(monkeypatch):
     monkeypatch.setattr(
         trades_module,
         "replay_signals",
-        lambda received_bars: records,
+        lambda received_bars, *, parameters=None: records,
     )
     model = TradingCostModel(fee_rate=0.001, slippage_rate=0.01)
     config = BacktestRunConfig("BTC", PROFILE, model)
@@ -252,7 +255,7 @@ def test_repeated_runs_are_deterministic(monkeypatch):
     monkeypatch.setattr(
         trades_module,
         "replay_signals",
-        lambda received_bars: records,
+        lambda received_bars, *, parameters=None: records,
     )
     model = TradingCostModel(fee_rate=0.001)
     config = BacktestRunConfig("BTC", PROFILE, model)
@@ -333,3 +336,63 @@ def test_invalid_config_type_is_rejected():
 
 def test_config_normalizes_symbol():
     assert BacktestRunConfig(" btc ", PROFILE).symbol == "BTC"
+
+
+def test_config_defaults_to_existing_strategy_parameters():
+    config = BacktestRunConfig("BTC", PROFILE)
+
+    assert config.strategy is DEFAULT_STRATEGY_PARAMETERS
+    assert BacktestRunConfig("BTC", PROFILE, ZERO_COSTS).strategy is (
+        DEFAULT_STRATEGY_PARAMETERS
+    )
+
+
+def test_invalid_strategy_type_is_rejected():
+    with pytest.raises(TypeError, match="strategy"):
+        BacktestRunConfig("BTC", PROFILE, strategy=object())
+
+
+def test_run_passes_strategy_and_reports_configured_minimum(monkeypatch):
+    custom = StrategyParameters(
+        fast_ema=5,
+        slow_ema=10,
+        rsi_period=5,
+        macd_fast=5,
+        macd_slow=10,
+        macd_signal=3,
+        volume_period=5,
+        min_candles=20,
+    )
+    config = BacktestRunConfig("BTC", PROFILE, strategy=custom)
+    captured = {}
+
+    def fake_simulate(
+        symbol, bars, profile, cost_model=None, *, parameters=None
+    ):
+        captured["parameters"] = parameters
+        return []
+
+    monkeypatch.setattr(runner_module, "simulate_trades", fake_simulate)
+
+    result = run_backtest(_bars([100.0, 110.0, 115.0]), config)
+
+    assert captured["parameters"] is custom
+    assert result.minimum_history_bars == 20
+    assert result.config is config
+
+
+def test_run_passes_default_strategy_when_omitted(monkeypatch):
+    captured = {}
+
+    def fake_simulate(
+        symbol, bars, profile, cost_model=None, *, parameters=None
+    ):
+        captured["parameters"] = parameters
+        return []
+
+    monkeypatch.setattr(runner_module, "simulate_trades", fake_simulate)
+
+    result = run_backtest(_bars([100.0, 110.0, 115.0]), CONFIG)
+
+    assert captured["parameters"] is DEFAULT_STRATEGY_PARAMETERS
+    assert result.minimum_history_bars == MIN_CANDLES

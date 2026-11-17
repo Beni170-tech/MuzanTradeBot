@@ -17,6 +17,10 @@ from backtest.execution import BacktestPosition, simulate_exit
 from backtest.replay import HistoricalBar, replay_signals
 from risk.risk_manager import validate_trade
 from risk.risk_profile import RiskProfile
+from strategy.parameters import (
+    DEFAULT_STRATEGY_PARAMETERS,
+    StrategyParameters,
+)
 from trader.paper.order import PaperOrderStatus
 from trader.trade import build_trade
 
@@ -58,6 +62,8 @@ def simulate_trades(
     bars: list[HistoricalBar] | tuple[HistoricalBar, ...],
     profile: RiskProfile,
     cost_model: TradingCostModel | None = None,
+    *,
+    parameters=None,
 ) -> list[HistoricalTrade]:
     """Replay signals and simulate non-overlapping historical trades.
 
@@ -75,6 +81,8 @@ def simulate_trades(
             supplied, completed trades carry a full cost breakdown. The
             underlying entry/exit quote prices and exit rules remain
             unchanged. None means no cost calculation is attached.
+        parameters: Optional immutable strategy configuration forwarded
+            unchanged to signal replay. ``None`` uses existing defaults.
 
     Returns:
         HistoricalTrade records in chronological order. The final record
@@ -82,7 +90,8 @@ def simulate_trades(
 
     Raises:
         ValueError: If symbol is empty or invalid.
-        TypeError: If profile is not a RiskProfile.
+        TypeError: If profile is not a RiskProfile or parameters has the
+            wrong type.
     """
     if not isinstance(symbol, str) or not symbol.strip():
         raise ValueError("symbol must be a non-empty string")
@@ -90,12 +99,16 @@ def simulate_trades(
         raise TypeError("profile must be a RiskProfile")
     if cost_model is not None and not isinstance(cost_model, TradingCostModel):
         raise TypeError("cost_model must be a TradingCostModel or None")
+    if parameters is None:
+        parameters = DEFAULT_STRATEGY_PARAMETERS
+    elif not isinstance(parameters, StrategyParameters):
+        raise TypeError("parameters must be a StrategyParameters or None")
 
     normalized_symbol = symbol.strip().upper()
 
     # Replay must run exactly once per simulation; all decisions below use
     # these records rather than recomputing indicators.
-    records = replay_signals(bars)
+    records = replay_signals(bars, parameters=parameters)
     if not records:
         return []
 

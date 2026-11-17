@@ -13,25 +13,31 @@ Guardian Mode purpose:
     existing risk gates decide the outcome.
 """
 
-# Lookback / sensitivity constants.
-FAST_EMA = 20
-SLOW_EMA = 50
-RSI_PERIOD = 14
-MACD_FAST = 12
-MACD_SLOW = 26
-MACD_SIGNAL = 9
-VOLUME_PERIOD = 20
+from strategy.parameters import (
+    DEFAULT_STRATEGY_PARAMETERS,
+    StrategyParameters,
+)
+
+# Lookback / sensitivity constants. They mirror the immutable default
+# strategy configuration so existing imports keep working.
+FAST_EMA = DEFAULT_STRATEGY_PARAMETERS.fast_ema
+SLOW_EMA = DEFAULT_STRATEGY_PARAMETERS.slow_ema
+RSI_PERIOD = DEFAULT_STRATEGY_PARAMETERS.rsi_period
+MACD_FAST = DEFAULT_STRATEGY_PARAMETERS.macd_fast
+MACD_SLOW = DEFAULT_STRATEGY_PARAMETERS.macd_slow
+MACD_SIGNAL = DEFAULT_STRATEGY_PARAMETERS.macd_signal
+VOLUME_PERIOD = DEFAULT_STRATEGY_PARAMETERS.volume_period
 
 # Data sufficiency: enough bars to warm up the slowest indicators
 # (EMA 50, MACD 26/9) with room to spare.
-MIN_CANDLES = 60
+MIN_CANDLES = DEFAULT_STRATEGY_PARAMETERS.min_candles
 
 # Signal thresholds.
-VOLUME_CONFIRM_RATIO = 1.5  # Current volume >= this multiple of average confirms a move.
-VOLUME_CONFIRM_BOOST = 6    # Added to confidence when volume confirms.
-CONFIDENCE_STRONG = 88      # All available votes agree with the trend.
-CONFIDENCE_MID = 74         # Two of three votes agree with the trend.
-CONFIDENCE_WAIT = 45        # Neutral value for WAIT (always below the trade threshold).
+VOLUME_CONFIRM_RATIO = DEFAULT_STRATEGY_PARAMETERS.volume_confirm_ratio
+VOLUME_CONFIRM_BOOST = DEFAULT_STRATEGY_PARAMETERS.volume_confirm_boost
+CONFIDENCE_STRONG = DEFAULT_STRATEGY_PARAMETERS.confidence_strong
+CONFIDENCE_MID = DEFAULT_STRATEGY_PARAMETERS.confidence_mid
+CONFIDENCE_WAIT = DEFAULT_STRATEGY_PARAMETERS.confidence_wait
 
 
 def _sma(values) -> float:
@@ -92,7 +98,12 @@ def rsi(closes, period: int = RSI_PERIOD):
     return 100.0 - (100.0 / (1.0 + rs))
 
 
-def macd(closes, fast: int = MACD_FAST, slow: int = MACD_SLOW, signal: int = MACD_SIGNAL):
+def macd(
+    closes,
+    fast: int = MACD_FAST,
+    slow: int = MACD_SLOW,
+    signal: int = MACD_SIGNAL,
+):
     """Return the latest MACD line, signal line, and histogram.
 
     Returns None if the data is too short to warm up both EMAs and the
@@ -156,13 +167,15 @@ def _neutral_result():
     }
 
 
-def compute_analysis(closes, volumes=None) -> dict:
+def compute_analysis(closes, volumes=None, *, parameters=None) -> dict:
     """Turn a series of closes (and optional volumes) into a verdict.
 
     Args:
         closes: Chronological list of closing prices.
         volumes: Optional chronological list of trading volumes, aligned
             with ``closes``.
+        parameters: Optional immutable strategy configuration. ``None``
+            uses the existing defaults exactly.
 
     Returns:
         A dict with:
@@ -171,8 +184,8 @@ def compute_analysis(closes, volumes=None) -> dict:
           - signal: "BUY", "SELL", or "WAIT". BUY/SELL require the
             directional votes (EMA vs fast EMA, MACD histogram, RSI
             momentum) to agree with the trend.
-          - confidence: 0-100. >= 70 only for BUY/SELL with at least
-            two votes aligned.
+          - confidence: 0-100. At least ``min_trade_confidence`` only for
+            BUY/SELL with enough configured directional votes aligned.
           - indicators: A snapshot of the raw indicator values for
             transparency and debugging (or None if unusable).
 
@@ -181,15 +194,35 @@ def compute_analysis(closes, volumes=None) -> dict:
         emitted. Votes are: price vs fast EMA, MACD histogram sign, and
         RSI momentum (RSI is neutral when overbought/oversold). Volume
         expansion raises confidence only, never a vote.
+
+    Raises:
+        TypeError: If ``parameters`` is not a StrategyParameters or None.
     """
-    if not isinstance(closes, (list, tuple)) or len(closes) < MIN_CANDLES:
+    if parameters is None:
+        parameters = DEFAULT_STRATEGY_PARAMETERS
+    elif not isinstance(parameters, StrategyParameters):
+        raise TypeError("parameters must be a StrategyParameters or None")
+
+    if (
+        not isinstance(closes, (list, tuple))
+        or len(closes) < parameters.min_candles
+    ):
         return _neutral_result()
 
-    fast = ema(closes, FAST_EMA)
-    slow = ema(closes, SLOW_EMA)
-    macd_result = macd(closes)
-    rsi_value = rsi(closes)
-    ratio = volume_ratio(volumes) if volumes else None
+    fast = ema(closes, parameters.fast_ema)
+    slow = ema(closes, parameters.slow_ema)
+    macd_result = macd(
+        closes,
+        fast=parameters.macd_fast,
+        slow=parameters.macd_slow,
+        signal=parameters.macd_signal,
+    )
+    rsi_value = rsi(closes, period=parameters.rsi_period)
+    ratio = (
+        volume_ratio(volumes, period=parameters.volume_period)
+        if volumes
+        else None
+    )
 
     if fast is None or slow is None or macd_result is None:
         return _neutral_result()
@@ -208,28 +241,48 @@ def compute_analysis(closes, volumes=None) -> dict:
         vote_macd = 1 if histogram > 0 else (-1 if histogram < 0 else 0)
 
     vote_rsi = 0
-    if rsi_value is not None and not (rsi_value >= 70 or rsi_value <= 30):
-        # 50 is exactly neutral; only real momentum (either way) votes.
-        vote_rsi = 1 if rsi_value > 50 else (-1 if rsi_value < 50 else 0)
+    if rsi_value is not None and not (
+        rsi_value >= parameters.rsi_overbought
+        or rsi_value <= parameters.rsi_oversold
+    ):
+        # The configured neutral value has no momentum edge.
+        if rsi_value > parameters.rsi_neutral:
+            vote_rsi = 1
+        elif rsi_value < parameters.rsi_neutral:
+            vote_rsi = -1
 
     net_votes = vote_ema + vote_macd + vote_rsi
 
     # --- Decision and confidence ------------------------------------
     signal = "WAIT"
-    confidence = CONFIDENCE_WAIT
-    if trend == "Bullish" and net_votes >= 2:
+    confidence = parameters.confidence_wait
+    if (
+        trend == "Bullish"
+        and net_votes >= parameters.min_directional_votes
+    ):
         signal = "BUY"
-        confidence = CONFIDENCE_STRONG if net_votes >= 3 else CONFIDENCE_MID
-    elif trend == "Bearish" and net_votes <= -2:
+        confidence = (
+            parameters.confidence_strong
+            if net_votes >= 3
+            else parameters.confidence_mid
+        )
+    elif (
+        trend == "Bearish"
+        and net_votes <= -parameters.min_directional_votes
+    ):
         signal = "SELL"
-        confidence = CONFIDENCE_STRONG if net_votes <= -3 else CONFIDENCE_MID
+        confidence = (
+            parameters.confidence_strong
+            if net_votes <= -3
+            else parameters.confidence_mid
+        )
 
     # Volume never votes, but it can confirm (or cast doubt on) a move.
     if signal != "WAIT" and ratio is not None:
-        if ratio >= VOLUME_CONFIRM_RATIO:
-            confidence += VOLUME_CONFIRM_BOOST
+        if ratio >= parameters.volume_confirm_ratio:
+            confidence += parameters.volume_confirm_boost
 
-    confidence = max(0, min(95, confidence))
+    confidence = max(0, min(parameters.max_confidence, confidence))
 
     return {
         "trend": trend,
@@ -239,7 +292,11 @@ def compute_analysis(closes, volumes=None) -> dict:
             "ema_fast": round(fast, 2) if fast is not None else None,
             "ema_slow": round(slow, 2) if slow is not None else None,
             "rsi": round(rsi_value, 2) if rsi_value is not None else None,
-            "macd_histogram": round(macd_result["histogram"], 4) if macd_result else None,
+            "macd_histogram": (
+                round(macd_result["histogram"], 4)
+                if macd_result
+                else None
+            ),
             "volume_ratio": round(ratio, 2) if ratio is not None else None,
         },
     }

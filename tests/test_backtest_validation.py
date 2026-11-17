@@ -126,7 +126,7 @@ def _record(bar, decision):
 
 
 def _patch_replay(monkeypatch):
-    def fake_replay(received_bars):
+    def fake_replay(received_bars, *, parameters=None):
         records = [_record(received_bars[0], "BUY")]
         records.extend(
             _record(bar, "WAIT") for bar in received_bars[1:]

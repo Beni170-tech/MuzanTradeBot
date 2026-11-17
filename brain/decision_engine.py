@@ -8,20 +8,35 @@ execute, prioritizing capital preservation above all else.
 
 import math
 
+from strategy.parameters import (
+    DEFAULT_STRATEGY_PARAMETERS,
+    StrategyParameters,
+)
 
-def make_decision(analysis: dict) -> str:
+
+def make_decision(analysis: dict, *, parameters=None) -> str:
     """Decide what action to take based on market analysis.
 
     Args:
         analysis: A dict of market analysis data (e.g. from
             market.analyzer.analyze_coin) containing price, trend,
             signal, and confidence.
+        parameters: Optional immutable strategy configuration. ``None``
+            uses the existing defaults exactly.
 
     Returns:
         A decision string: "BUY", "SELL", or "WAIT". A trade is
         only recommended when the signal, trend, and confidence all
         agree strongly; anything malformed or weak returns "WAIT".
+
+    Raises:
+        TypeError: If ``parameters`` is not a StrategyParameters or None.
     """
+    if parameters is None:
+        parameters = DEFAULT_STRATEGY_PARAMETERS
+    elif not isinstance(parameters, StrategyParameters):
+        raise TypeError("parameters must be a StrategyParameters or None")
+
     signal = analysis.get("signal")
     trend = analysis.get("trend")
     confidence = analysis.get("confidence")
@@ -42,14 +57,14 @@ def make_decision(analysis: dict) -> str:
     if (
         signal == "BUY"
         and trend == "Bullish"
-        and confidence >= 70
+        and confidence >= parameters.min_trade_confidence
     ):
         return "BUY"
 
     if (
         signal == "SELL"
         and trend == "Bearish"
-        and confidence >= 70
+        and confidence >= parameters.min_trade_confidence
     ):
         return "SELL"
 

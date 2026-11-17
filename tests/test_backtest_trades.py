@@ -9,6 +9,7 @@ from backtest.replay import HistoricalBar, SignalRecord
 from backtest.trades import HistoricalTrade, simulate_trades
 from market.indicators import MIN_CANDLES
 from risk.risk_profile import RiskProfile
+from strategy.parameters import DEFAULT_STRATEGY_PARAMETERS, StrategyParameters
 from trader.paper.order import PaperOrderStatus
 
 START = datetime(2024, 1, 1, tzinfo=timezone.utc)
@@ -60,7 +61,7 @@ def _patch_replay(monkeypatch, bars, decisions):
     ]
     calls = []
 
-    def fake_replay(received_bars):
+    def fake_replay(received_bars, *, parameters=None):
         calls.append(received_bars)
         return records
 
@@ -208,7 +209,7 @@ def test_replay_records_map_to_original_bar_indices(monkeypatch):
     monkeypatch.setattr(
         trades_module,
         "replay_signals",
-        lambda received_bars: records,
+        lambda received_bars, *, parameters=None: records,
     )
 
     trade = simulate_trades("BTC", bars, PROFILE)[0]
@@ -226,3 +227,50 @@ def test_invalid_symbol_and_profile_are_rejected(monkeypatch):
         simulate_trades("  ", bars, PROFILE)
     with pytest.raises(TypeError):
         simulate_trades("BTC", bars, object())
+
+
+def test_parameters_are_forwarded_to_replay(monkeypatch):
+    bars = _bars([100.0, 101.0])
+    captured = []
+
+    def fake_replay(received_bars, *, parameters=None):
+        captured.append(parameters)
+        return []
+
+    monkeypatch.setattr(trades_module, "replay_signals", fake_replay)
+    custom = StrategyParameters(
+        fast_ema=5,
+        slow_ema=10,
+        rsi_period=5,
+        macd_fast=5,
+        macd_slow=10,
+        macd_signal=3,
+        volume_period=5,
+        min_candles=20,
+    )
+
+    assert simulate_trades("BTC", bars, PROFILE, parameters=custom) == []
+    assert captured == [custom]
+
+
+def test_omitted_parameters_use_default_instance(monkeypatch):
+    bars = _bars([100.0, 101.0])
+    captured = []
+
+    def fake_replay(received_bars, *, parameters=None):
+        captured.append(parameters)
+        return []
+
+    monkeypatch.setattr(trades_module, "replay_signals", fake_replay)
+
+    simulate_trades("BTC", bars, PROFILE)
+
+    assert captured == [DEFAULT_STRATEGY_PARAMETERS]
+
+
+def test_invalid_parameters_type_is_rejected(monkeypatch):
+    bars = _bars([100.0])
+    _patch_replay(monkeypatch, bars, ["WAIT"])
+
+    with pytest.raises(TypeError, match="parameters"):
+        simulate_trades("BTC", bars, PROFILE, parameters=object())

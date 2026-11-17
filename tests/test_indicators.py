@@ -9,6 +9,7 @@ from market.indicators import (
     rsi,
     volume_ratio,
 )
+from strategy.parameters import DEFAULT_STRATEGY_PARAMETERS, StrategyParameters
 
 
 def _uptrend(n=250, growth=0.001, start=100.0):
@@ -158,3 +159,77 @@ def test_result_includes_indicator_snapshot():
     assert result["indicators"] is not None
     for key in ("ema_fast", "ema_slow", "rsi", "macd_histogram", "volume_ratio"):
         assert key in result["indicators"]
+
+
+def test_default_parameters_match_omitted_behavior():
+    closes = _uptrend()
+    volumes = [1_000.0] * (len(closes) - 1) + [2_000.0]
+
+    omitted = compute_analysis(closes, volumes)
+    explicit = compute_analysis(
+        closes,
+        volumes,
+        parameters=DEFAULT_STRATEGY_PARAMETERS,
+    )
+
+    assert explicit == omitted
+    assert explicit["confidence"] == omitted["confidence"]
+
+
+def test_custom_indicator_parameters_change_snapshot():
+    custom = StrategyParameters(
+        fast_ema=5,
+        slow_ema=10,
+        rsi_period=5,
+        macd_fast=5,
+        macd_slow=10,
+        macd_signal=3,
+        volume_period=5,
+        min_candles=12,
+    )
+
+    default = compute_analysis(_uptrend(n=80))
+    changed = compute_analysis(_uptrend(n=20), parameters=custom)
+
+    assert changed["indicators"]["ema_fast"] != default["indicators"]["ema_fast"]
+    assert changed["indicators"]["ema_slow"] != default["indicators"]["ema_slow"]
+
+
+def test_custom_min_candles_controls_data_sufficiency():
+    custom = StrategyParameters(
+        fast_ema=5,
+        slow_ema=10,
+        rsi_period=5,
+        macd_fast=5,
+        macd_slow=10,
+        macd_signal=3,
+        volume_period=5,
+        min_candles=20,
+    )
+
+    result = compute_analysis(_uptrend(n=19), parameters=custom)
+
+    assert result["trend"] == "Unknown"
+    assert result["signal"] == "WAIT"
+    assert result["confidence"] == 0
+
+
+def test_custom_confidence_cap_limits_volume_boost():
+    custom = StrategyParameters(
+        confidence_mid=90,
+        confidence_strong=90,
+        max_confidence=90,
+        volume_confirm_boost=10,
+    )
+    closes = _uptrend()
+    volumes = [1_000.0] * (len(closes) - 1) + [3_000.0]
+
+    result = compute_analysis(closes, volumes, parameters=custom)
+
+    assert result["signal"] == "BUY"
+    assert result["confidence"] == 90
+
+
+def test_invalid_parameters_type_is_rejected():
+    with pytest.raises(TypeError, match="parameters"):
+        compute_analysis(_uptrend(), parameters=object())

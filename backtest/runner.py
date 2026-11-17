@@ -36,8 +36,11 @@ import math
 from backtest.costs import TradingCostModel, ZERO_COSTS
 from backtest.report import BacktestReport, build_backtest_report
 from backtest.trades import HistoricalTrade, simulate_trades
-from market.indicators import MIN_CANDLES
 from risk.risk_profile import RiskProfile
+from strategy.parameters import (
+    DEFAULT_STRATEGY_PARAMETERS,
+    StrategyParameters,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,11 +55,14 @@ class BacktestRunConfig:
             and reported results cannot use different balances.
         cost_model: Explicit fee and slippage assumptions. The default is
             the existing exact zero-cost model.
+        strategy: Immutable strategy parameters. The default reproduces
+            the existing indicator and decision behavior exactly.
     """
 
     symbol: str
     risk_profile: RiskProfile
     cost_model: TradingCostModel = ZERO_COSTS
+    strategy: StrategyParameters = DEFAULT_STRATEGY_PARAMETERS
 
     def __post_init__(self) -> None:
         if not isinstance(self.symbol, str) or not self.symbol.strip():
@@ -65,6 +71,8 @@ class BacktestRunConfig:
             raise TypeError("risk_profile must be a RiskProfile")
         if not isinstance(self.cost_model, TradingCostModel):
             raise TypeError("cost_model must be a TradingCostModel")
+        if not isinstance(self.strategy, StrategyParameters):
+            raise TypeError("strategy must be a StrategyParameters")
 
         for field_name in (
             "balance",
@@ -185,6 +193,7 @@ def run_backtest(
         bar_snapshot,
         config.risk_profile,
         cost_model=config.cost_model,
+        parameters=config.strategy,
     )
     report = build_backtest_report(
         trades,
@@ -203,5 +212,5 @@ def run_backtest(
         last_bar_timestamp=(
             bar_snapshot[-1].timestamp if bar_snapshot else None
         ),
-        minimum_history_bars=MIN_CANDLES,
+        minimum_history_bars=config.strategy.min_candles,
     )
