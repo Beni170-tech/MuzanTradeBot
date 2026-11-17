@@ -83,6 +83,14 @@ class HistoricalDataMetadata:
 
 
 @dataclass(frozen=True, slots=True)
+class HistoricalData:
+    """Validated historical bars and their loading metadata."""
+
+    bars: tuple[HistoricalBar, ...]
+    metadata: HistoricalDataMetadata
+
+
+@dataclass(frozen=True, slots=True)
 class HistoricalBacktestResult:
     """One loaded-data backtest and its data-loading metadata."""
 
@@ -207,6 +215,54 @@ def _load_bars(symbol: str) -> list[HistoricalBar]:
         ) from exc
 
 
+def load_historical_bars(
+    symbol: str,
+    *,
+    timeframe: str = SUPPORTED_TIMEFRAME,
+    period: str = SUPPORTED_PERIOD,
+) -> HistoricalData:
+    """Load and validate one supported provider dataset.
+
+    Args:
+        symbol: Supported provider symbol (BTC, ETH, or SOL),
+            case-insensitive.
+        timeframe: Provider timeframe. The existing provider supports
+            only hourly ``"1h"`` data.
+        period: Provider lookback. The existing provider supports only
+            ``"30d"``.
+
+    Returns:
+        An immutable dataset containing validated bars and metadata.
+
+    Raises:
+        TypeError: If an argument has the wrong type.
+        ValueError: If the symbol, timeframe, or period is unsupported.
+        HistoricalDataRateLimitError: If the provider reports HTTP 429.
+        HistoricalDataUnavailableError: If the provider cannot be reached
+            or returns another HTTP/network failure.
+        HistoricalDataError: If provider data is malformed, empty,
+            duplicated, unordered, or otherwise unusable.
+    """
+    normalized_symbol = _normalize_symbol(symbol)
+    normalized_timeframe = _normalize_timeframe(timeframe)
+    normalized_period = _normalize_period(period)
+
+    bars = _load_bars(normalized_symbol)
+    validated_bars = _validate_loaded_bars(bars)
+    return HistoricalData(
+        bars=validated_bars,
+        metadata=HistoricalDataMetadata(
+            provider=PROVIDER_NAME,
+            symbol=normalized_symbol,
+            timeframe=normalized_timeframe,
+            period=normalized_period,
+            bar_count=len(validated_bars),
+            first_timestamp=validated_bars[0].timestamp,
+            last_timestamp=validated_bars[-1].timestamp,
+        ),
+    )
+
+
 def run_historical_backtest(
     symbol: str,
     config: BacktestRunConfig,
@@ -251,19 +307,14 @@ def run_historical_backtest(
             "config.symbol must match the requested historical symbol"
         )
 
-    bars = _load_bars(normalized_symbol)
-    validated_bars = _validate_loaded_bars(bars)
-    backtest = run_backtest(validated_bars, config)
+    data = load_historical_bars(
+        normalized_symbol,
+        timeframe=normalized_timeframe,
+        period=normalized_period,
+    )
+    backtest = run_backtest(data.bars, config)
 
     return HistoricalBacktestResult(
         backtest=backtest,
-        data=HistoricalDataMetadata(
-            provider=PROVIDER_NAME,
-            symbol=normalized_symbol,
-            timeframe=normalized_timeframe,
-            period=normalized_period,
-            bar_count=len(validated_bars),
-            first_timestamp=validated_bars[0].timestamp,
-            last_timestamp=validated_bars[-1].timestamp,
-        ),
+        data=data.metadata,
     )

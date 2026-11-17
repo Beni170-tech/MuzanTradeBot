@@ -15,9 +15,11 @@ from backtest.replay import HistoricalBar, SignalRecord
 from backtest.runner import BacktestRunConfig
 from backtest.service import (
     HistoricalBacktestResult,
+    HistoricalData,
     HistoricalDataError,
     HistoricalDataRateLimitError,
     HistoricalDataUnavailableError,
+    load_historical_bars,
     run_historical_backtest,
 )
 from market.indicators import MIN_CANDLES
@@ -142,6 +144,57 @@ def test_service_loads_bars_and_executes_real_backtest(monkeypatch):
     assert result.backtest.completed_trades == 1
     assert result.backtest.config is CONFIG
     assert result.backtest.history_sufficient
+
+
+def test_load_historical_bars_returns_validated_dataset(monkeypatch):
+    bars = _bars(3)
+    calls = _patch_loader(monkeypatch, bars)
+
+    data = load_historical_bars(
+        "btc",
+        timeframe=" 1H ",
+        period=" 30D ",
+    )
+
+    assert isinstance(data, HistoricalData)
+    assert calls == ["BTC"]
+    assert data.bars == tuple(bars)
+    assert isinstance(data.bars, tuple)
+    assert data.metadata.provider == "coingecko"
+    assert data.metadata.symbol == "BTC"
+    assert data.metadata.timeframe == "1h"
+    assert data.metadata.period == service.SUPPORTED_PERIOD
+    assert data.metadata.bar_count == 3
+    assert data.metadata.first_timestamp == START
+    assert data.metadata.last_timestamp == bars[-1].timestamp
+
+
+def test_run_historical_backtest_delegates_to_public_loader(monkeypatch):
+    bars = _bars(3)
+    _patch_loader(monkeypatch, bars)
+    calls = []
+    original_load = service.load_historical_bars
+
+    def spy_load(symbol, *, timeframe, period):
+        calls.append((symbol, timeframe, period))
+        return original_load(
+            symbol,
+            timeframe=timeframe,
+            period=period,
+        )
+
+    monkeypatch.setattr(service, "load_historical_bars", spy_load)
+
+    result = run_historical_backtest(
+        "btc",
+        CONFIG,
+        timeframe="1H",
+        period="30D",
+    )
+
+    assert calls == [("BTC", "1h", "30d")]
+    assert result.data.bar_count == 3
+    assert result.data.symbol == "BTC"
 
 
 def test_existing_provider_converts_response_into_historical_bars(monkeypatch):
