@@ -144,8 +144,29 @@ def _is_finite_number(value) -> bool:
         return False
 
 
-def _validate_bars(bars) -> tuple[HistoricalBar, ...]:
-    """Validate bars without sorting, repairing, or dropping any."""
+def validate_historical_bars(
+    bars,
+    *,
+    require_timezone_aware: bool = False,
+) -> tuple[HistoricalBar, ...]:
+    """Validate supplied bars without sorting, repairing, or dropping any.
+
+    Args:
+        bars: List or tuple of HistoricalBar values in chronological
+            input order. The sequence is not modified.
+        require_timezone_aware: When True, every timestamp must carry an
+            explicit UTC offset. Defaults to False to preserve existing
+            Task 9 behavior.
+
+    Returns:
+        The same bars as an immutable tuple.
+
+    Raises:
+        TypeError: If the sequence or a bar has an invalid type.
+        ValueError: If a price, volume, or timestamp is invalid, a
+            timestamp is timezone-naive when it is required to be aware,
+            or timestamps are not strictly increasing in input order.
+    """
     if not isinstance(bars, (list, tuple)):
         raise TypeError("bars must be a list or tuple of HistoricalBar values")
 
@@ -160,6 +181,13 @@ def _validate_bars(bars) -> tuple[HistoricalBar, ...]:
             raise TypeError(
                 f"bars[{index}].timestamp must be a datetime, got "
                 f"{type(bar.timestamp).__name__}"
+            )
+        if require_timezone_aware and (
+            bar.timestamp.tzinfo is None
+            or bar.timestamp.utcoffset() is None
+        ):
+            raise ValueError(
+                f"bars[{index}].timestamp must be timezone-aware"
             )
         if not _is_finite_number(bar.close) or bar.close <= 0:
             raise ValueError(
@@ -184,6 +212,11 @@ def _validate_bars(bars) -> tuple[HistoricalBar, ...]:
         previous_timestamp = bar.timestamp
 
     return tuple(bars)
+
+
+def _validate_bars(bars) -> tuple[HistoricalBar, ...]:
+    """Validate bars using the shared public validator."""
+    return validate_historical_bars(bars)
 
 
 def _validate_classifier_parameters(
@@ -276,19 +309,20 @@ def _classify_validated_window(
     return condition, return_percent, efficiency
 
 
-def classify_market_condition(
+def classify_market_window(
     bars,
     *,
     trend_threshold_percent: float = DEFAULT_TREND_THRESHOLD_PERCENT,
     min_directional_efficiency: float = (
         DEFAULT_MIN_DIRECTIONAL_EFFICIENCY
     ),
-) -> MarketCondition:
-    """Classify one supplied bar sequence as bullish, bearish, or sideways.
+) -> tuple[MarketCondition, float, float]:
+    """Classify one bar sequence and return its measurements.
 
-    The classification uses close-to-close return and directional
-    efficiency (net movement divided by total absolute movement). A
-    window must contain at least two bars.
+    Returns:
+        The market condition, close-to-close return percentage, and
+        directional efficiency (net movement divided by total absolute
+        movement). At least two bars are required.
 
     Raises:
         TypeError: If bars or classifier parameters have invalid types.
@@ -308,7 +342,33 @@ def classify_market_condition(
         trend_threshold_percent=threshold,
         min_directional_efficiency=efficiency,
     )
-    condition, _, _ = _classify_validated_window(validated, config)
+    return _classify_validated_window(validated, config)
+
+
+def classify_market_condition(
+    bars,
+    *,
+    trend_threshold_percent: float = DEFAULT_TREND_THRESHOLD_PERCENT,
+    min_directional_efficiency: float = (
+        DEFAULT_MIN_DIRECTIONAL_EFFICIENCY
+    ),
+) -> MarketCondition:
+    """Classify one supplied bar sequence as bullish, bearish, or sideways.
+
+    The classification uses close-to-close return and directional
+    efficiency (net movement divided by total absolute movement). A
+    window must contain at least two bars.
+
+    Raises:
+        TypeError: If bars or classifier parameters have invalid types.
+        ValueError: If bars or classifier values are invalid, or fewer
+            than two bars are supplied.
+    """
+    condition, _, _ = classify_market_window(
+        bars,
+        trend_threshold_percent=trend_threshold_percent,
+        min_directional_efficiency=min_directional_efficiency,
+    )
     return condition
 
 
