@@ -14,7 +14,7 @@ import os
 # Ensure project root is on the path
 sys.path.insert(0, os.path.dirname(__file__))
 
-from config.settings import settings
+from config.settings import settings, validate_settings
 
 
 def main():
@@ -25,6 +25,20 @@ def main():
     print(f"Guardian Mode: {settings.GUARDIAN_MODE}")
     print(f"Paper Trading: {settings.PAPER_TRADING}")
     print("---------------------------------")
+
+    # Validate risk-related configuration (Milestone M-A). Errors block
+    # startup; warnings make disabled safety features visible. Values are
+    # never printed, only setting names and the reason.
+    issues = validate_settings()
+    errors = [issue for issue in issues if issue.severity == "error"]
+    if errors:
+        print("\n[ERROR] Invalid configuration; refusing to start.")
+        for issue in errors:
+            print(f"  {issue.format()}")
+        sys.exit(1)
+    for issue in issues:
+        if issue.severity == "warning":
+            print(f"[WARN] {issue.format()}")
 
     # Validate execution mode safety (Sprint 10.2)
     # An invalid or inconsistent execution mode must not start the bot.

@@ -3,7 +3,10 @@ MuzanTradeBot - Configuration Settings
 Loads environment variables securely using python-dotenv.
 """
 
+import math
 import os
+from dataclasses import dataclass
+
 from dotenv import load_dotenv
 
 # Load .env file from project root
@@ -248,3 +251,149 @@ class Settings:
 
 # Singleton instance
 settings = Settings()
+
+
+# ---------------------------------------------------------------------------
+# Startup configuration validation (Milestone M-A)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SettingsIssue:
+    """One configuration problem or visibility notice.
+
+    Attributes:
+        severity: ``"error"`` blocks startup; ``"warning"`` is shown
+            but does not prevent starting.
+        setting: The environment variable / setting name.
+        message: A short explanation with no secret values.
+    """
+
+    severity: str
+    setting: str
+    message: str
+
+    def format(self) -> str:
+        """Return one printable line naming the setting."""
+        return f"{self.setting}: {self.message}"
+
+
+# Limits documented as "<= 0 disables". A non-positive value keeps its
+# documented meaning, but 0 is the supported disable value, so a negative
+# limit is reported as a configuration mistake rather than silently
+# disabling a safety feature.
+_LIMIT_SETTINGS = (
+    "PORTFOLIO_RISK_LIMIT",
+    "PORTFOLIO_EXPOSURE_LIMIT",
+    "PORTFOLIO_DAILY_LOSS_LIMIT",
+    "PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL",
+)
+
+_COUNT_LIMIT_SETTINGS = (
+    "PORTFOLIO_MAX_POSITIONS_PER_SYMBOL",
+    "PORTFOLIO_MAX_OPEN_POSITIONS",
+)
+
+
+
+def _is_finite_number(value: object) -> bool:
+    """Return True for a real, finite int/float (never a bool)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(float(value))
+
+
+def validate_settings() -> list[SettingsIssue]:
+    """Validate risk-related configuration for startup.
+
+    Rejects values that cannot be used safely (negative limits,
+    non-finite numbers, a zero risk percentage) while preserving the
+    documented ``0 = disabled`` behaviour for portfolio limits.
+
+    Returns:
+        Every issue found, in a stable order. Errors block startup;
+        warnings (including disabled limits) are reported so an operator
+        can see that a safety feature is off.
+    """
+    issues: list[SettingsIssue] = []
+
+    def error(setting: str, message: str) -> None:
+        issues.append(SettingsIssue("error", setting, message))
+
+    def warning(setting: str, message: str) -> None:
+        issues.append(SettingsIssue("warning", setting, message))
+
+    balance = settings.ACCOUNT_BALANCE
+    if not _is_finite_number(balance) or balance <= 0:
+        error(
+            "ACCOUNT_BALANCE",
+            "must be a finite number greater than 0",
+        )
+
+    risk = settings.RISK_PERCENT
+    if not _is_finite_number(risk) or risk <= 0:
+        error(
+            "RISK_PERCENT",
+            "must be a finite number greater than 0",
+        )
+    elif risk > 100:
+        error("RISK_PERCENT", "must not exceed 100 percent per trade")
+
+    for name in ("STOP_LOSS_PERCENT", "TAKE_PROFIT_PERCENT"):
+        value = getattr(settings, name)
+        if not _is_finite_number(value) or value <= 0:
+            error(name, "must be a finite number greater than 0")
+
+    for name in _LIMIT_SETTINGS:
+        value = getattr(settings, name)
+        if not _is_finite_number(value) or value < 0:
+            error(
+                name,
+                "must be a finite number >= 0 (use 0 to disable)",
+            )
+        elif value == 0:
+            warning(name, "disabled (0); no limit is enforced")
+
+    for name in _COUNT_LIMIT_SETTINGS:
+        value = getattr(settings, name)
+        if isinstance(value, bool) or not isinstance(value, int):
+            error(name, "must be an integer >= 0 (use 0 to disable)")
+        elif value < 0:
+            error(name, "must be an integer >= 0 (use 0 to disable)")
+        elif value == 0:
+            warning(name, "disabled (0); no limit is enforced")
+
+    interval = settings.PAPER_MONITOR_INTERVAL_SECONDS
+    if not _is_finite_number(interval):
+        error(
+            "PAPER_MONITOR_INTERVAL_SECONDS",
+            "must be a finite number of seconds",
+        )
+    elif interval <= 0:
+        warning(
+            "PAPER_MONITOR_INTERVAL_SECONDS",
+            "disabled (<= 0); open positions are not monitored in "
+            "the background",
+        )
+
+    rate_window = settings.TELEGRAM_COMMAND_RATE_WINDOW_SECONDS
+    if not _is_finite_number(rate_window):
+        error(
+            "TELEGRAM_COMMAND_RATE_WINDOW_SECONDS",
+            "must be a finite number of seconds",
+        )
+
+    # EXECUTION_MODE is validated separately by the existing startup
+    # safety check in main.py (Sprint 10.2); it is not a risk number and
+    # is deliberately left out of this validator.
+
+    return issues
+
+
+def settings_errors(
+    issues: list[SettingsIssue] | None = None,
+) -> list[SettingsIssue]:
+    """Return only the startup-blocking issues."""
+    if issues is None:
+        issues = validate_settings()
+    return [issue for issue in issues if issue.severity == "error"]
