@@ -73,6 +73,11 @@ from trader.paper.portfolio_risk import (
 from trader.trade import build_trade
 from journal.journal import log_trade
 from alerts.manager import AlertManager, build_alert_manager
+from telegram_bot.analyze_reporting import (
+    dispatch_entry_gate_alerts,
+    entry_gate_rejection_message,
+    format_pnl_value as _format_pnl_value,
+)
 from telegram_bot.rate_limit import (
     build_rate_limit_config,
     check_rate_limit,
@@ -793,136 +798,36 @@ async def version(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 def _entry_gate_rejection_message(trade, outcome) -> str:
     """Render the /analyze rejection text for one entry gate outcome.
 
-    The text is byte-for-byte the text the inline gate checks appended
-    before the extraction, produced from the frozen snapshot the gate
-    returned instead of re-reading account state. ``outcome.rule``
-    selects the block, so message precedence follows the evaluator's
-    gate order.
+    The handler-level dependency lookup is preserved: the display
+    helpers are resolved here, at call time, from this module's
+    globals, so monkeypatching ``trade_risk_value``,
+    ``trade_exposure`` or ``_format_pnl_value`` on
+    ``telegram_bot.handlers`` still changes the rendered text exactly
+    as it did before the extraction. The wording lives in
+    :mod:`telegram_bot.analyze_reporting`.
     """
-    metrics = outcome.metrics
-
-    if outcome.rule == RULE_PORTFOLIO_RISK:
-        return (
-            f"\n⚠️ Portfolio Risk Limit Exceeded\n"
-            f"   Current Risk: ${metrics.current_risk:,.2f}\n"
-            f"   Risk Limit: ${metrics.risk_limit:,.2f}\n"
-            f"   Trade Risk: "
-            f"${trade_risk_value(trade):,.2f}\n"
-            f"   The trade was not placed.\n"
-            f"   Close existing positions to free up risk budget."
-        )
-
-    if outcome.rule == RULE_PORTFOLIO_EXPOSURE:
-        return (
-            f"\n⚠️ Portfolio Exposure Limit Exceeded\n"
-            f"   Current Exposure: ${metrics.current_exposure:,.2f}\n"
-            f"   Requested Exposure: "
-            f"${trade.price * trade.position_size:,.2f}\n"
-            f"   Exposure Limit: ${metrics.exposure_limit:,.2f}\n"
-            f"   The trade was not placed.\n"
-            f"   Close existing positions to free up exposure budget."
-        )
-
-    if outcome.rule == RULE_DAILY_LOSS:
-        return (
-            f"\n⛔ Daily Loss Limit Reached\n"
-            f"   Day: {metrics.day}\n"
-            f"   Today's Realized PnL: "
-            f"{_format_pnl_value(metrics.realized_pnl_today)}\n"
-            f"   Daily Loss Limit: ${metrics.loss_limit:,.2f}\n"
-            f"   The trade was not placed.\n"
-            f"   New paper trades resume on the next day."
-        )
-
-    if outcome.rule == RULE_MAX_OPEN_POSITIONS:
-        return (
-            f"\n⛔ Maximum Open Positions Reached\n"
-            f"   Current Open Positions: "
-            f"{metrics.current_open_positions}\n"
-            f"   Max Open Positions: "
-            f"{metrics.limit}\n"
-            f"   The trade was not placed.\n"
-            f"   Close existing positions to free up "
-            f"open-position capacity."
-        )
-
-    if outcome.rule in (RULE_SYMBOL_POSITIONS, RULE_SYMBOL_EXPOSURE):
-        block = (
-            f"\n⚠️ Symbol Concentration Limit Exceeded\n"
-            f"   Symbol: {trade.symbol}\n"
-        )
-        if outcome.rule == RULE_SYMBOL_POSITIONS:
-            block += (
-                f"   Open Positions: "
-                f"{metrics.open_positions}\n"
-                f"   Max Positions: "
-                f"{metrics.max_positions}\n"
-            )
-        else:
-            block += (
-                f"   Current Exposure: "
-                f"${metrics.symbol_exposure:,.2f}\n"
-                f"   Requested Exposure: "
-                f"${trade_exposure(trade):,.2f}\n"
-                f"   Exposure Limit: "
-                f"${metrics.exposure_limit:,.2f}\n"
-            )
-        block += (
-            f"   The trade was not placed.\n"
-            f"   Close existing positions to free up "
-            f"concentration budget."
-        )
-        return block
-
-    raise ValueError(
-        f"unsupported entry gate rejection rule: {outcome.rule!r}"
+    return entry_gate_rejection_message(
+        trade,
+        outcome,
+        pnl_formatter=_format_pnl_value,
+        risk_value=trade_risk_value,
+        exposure=trade_exposure,
     )
 
 
 async def _dispatch_entry_gate_alerts(trade, outcome) -> None:
-    """Dispatch the rejection alerts for one entry gate outcome.
+    """Dispatch the rejection alerts through this module's dispatcher.
 
-    Alert count, ordering and payloads match the pre-extraction
-    sequence: the daily-loss breaker alert precedes its rejection
-    alert, and the max-open-positions alert precedes its rejection
-    alert. Every dispatch is fail-safe and never raises.
+    The two-argument handler entry point is preserved, and the handler's
+    live ``_dispatch_alert`` is injected into the shared implementation.
+    That keeps the ``ALERTS_ENABLED`` check, the patchable alert manager
+    and the fail-safe dispatch semantics in the handler layer, while the
+    alert types, payloads and ordering live in
+    :mod:`telegram_bot.analyze_reporting`.
     """
-    if outcome.rule == RULE_DAILY_LOSS:
-        await _dispatch_alert("daily_loss_breaker", outcome.metrics)
-        await _dispatch_alert(
-            "trade_rejected",
-            trade,
-            "daily loss breaker active for today",
-        )
-        return
-
-    if outcome.rule == RULE_MAX_OPEN_POSITIONS:
-        await _dispatch_alert(
-            "max_open_positions_reached", outcome.metrics
-        )
-        await _dispatch_alert(
-            "trade_rejected",
-            trade,
-            "maximum open positions limit reached",
-        )
-        return
-
-    if outcome.rule == RULE_PORTFOLIO_RISK:
-        await _dispatch_alert(
-            "trade_rejected", trade, "portfolio risk limit exceeded"
-        )
-        return
-
-    if outcome.rule == RULE_PORTFOLIO_EXPOSURE:
-        await _dispatch_alert(
-            "trade_rejected", trade, "portfolio exposure limit exceeded"
-        )
-        return
-
-    if outcome.rule in (RULE_SYMBOL_POSITIONS, RULE_SYMBOL_EXPOSURE):
-        await _dispatch_alert(
-            "trade_rejected", trade, "symbol concentration limit exceeded"
-        )
+    await dispatch_entry_gate_alerts(
+        trade, outcome, dispatch_alert=_dispatch_alert
+    )
 
 
 async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1395,15 +1300,6 @@ async def close_command(
 # ---------------------------------------------------------------------------
 
 
-def _format_pnl_value(value: float) -> str:
-    """Format a PnL value with sign and currency symbol."""
-    if value > 0:
-        return f"+${value:.2f}"
-    if value < 0:
-        return f"-${abs(value):.2f}"
-    return "$0.00"
-
-
 def _format_streak(streak: int) -> str:
     """Format a win/loss streak for display."""
     if streak > 0:
@@ -1504,10 +1400,9 @@ def _position_mark_display(pos) -> str:
 def trade_risk_value(trade) -> float:
     """Compute the dollar risk of a trade (for display in gate messages).
 
-    Thin alias for :func:`trader.paper.portfolio_risk.trade_risk`, the
-    single source of truth for a candidate trade's risk contribution.
-    Keeping the name preserves the handler-level API used by callers
-    and tests while removing the duplicated formula.
+    Thin alias for this module's :func:`trade_risk`, resolved at call
+    time so patching ``telegram_bot.handlers.trade_risk`` keeps changing
+    both this value and the entry-gate rejection text built from it.
     """
     return trade_risk(trade)
 
