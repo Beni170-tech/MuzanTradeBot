@@ -78,6 +78,8 @@ from telegram_bot.analyze_reporting import (
     entry_gate_rejection_message,
     format_pnl_value as _format_pnl_value,
 )
+from telegram_bot.auth import authorization_status
+from telegram_bot.settings_report import format_settings_message
 from telegram_bot.rate_limit import (
     build_rate_limit_config,
     check_rate_limit,
@@ -767,7 +769,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/history - Show closed paper trades\n"
         "/close <SYMBOL> <EXIT_PRICE> [ORDER_ID] - Close a paper position\n"
         "  (ORDER_ID is required when several positions share a symbol)\n"
-        "/stats - Show paper trading performance dashboard"
+        "/stats - Show paper trading performance dashboard\n"
+        "/settings - Show execution mode, limits, access and alerts"
     )
     await update.message.reply_text(message)
 
@@ -1054,6 +1057,37 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ---------------------------------------------------------------------------
 # Paper Trading Management Commands (Sprint 6B)
 # ---------------------------------------------------------------------------
+
+async def settings_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Show operational settings without exposing credentials."""
+    if not check_rate_limit(update.effective_chat.id, _rate_limit_config):
+        await update.message.reply_text(
+            "⏳ Too many requests. Please wait a moment before trying again."
+        )
+        return
+
+    message = format_settings_message(
+        execution_mode=settings.EXECUTION_MODE,
+        paper_trading=settings.PAPER_TRADING,
+        guardian_mode=settings.GUARDIAN_MODE,
+        portfolio_risk_limit=settings.PORTFOLIO_RISK_LIMIT,
+        portfolio_exposure_limit=settings.PORTFOLIO_EXPOSURE_LIMIT,
+        daily_loss_limit=settings.PORTFOLIO_DAILY_LOSS_LIMIT,
+        max_open_positions=settings.PORTFOLIO_MAX_OPEN_POSITIONS,
+        max_positions_per_symbol=(
+            settings.PORTFOLIO_MAX_POSITIONS_PER_SYMBOL
+        ),
+        max_exposure_per_symbol=(
+            settings.PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL
+        ),
+        authorization_status=authorization_status(),
+        alerts_enabled=settings.ALERTS_ENABLED,
+        alert_chat_configured=bool(settings.TELEGRAM_ALERT_CHAT_ID),
+    )
+    await update.message.reply_text(message)
+
 
 async def paper_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show paper account summary."""

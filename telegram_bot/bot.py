@@ -22,6 +22,7 @@ from telegram_bot.handlers import (
     history_command,
     close_command,
     stats_command,
+    settings_command,
 )
 from trader.paper.monitor import PaperPositionMonitor
 
@@ -54,6 +55,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("history", history_command))
     app.add_handler(CommandHandler("close", close_command))
     app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("settings", settings_command))
 
     logger.info("Telegram application built successfully.")
     return app
