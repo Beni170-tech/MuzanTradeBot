@@ -12,8 +12,8 @@ later; the entry price is never used as a substitute.
 
 The monitor runs as an asyncio task in the Telegram event loop on a
 configurable interval, so it never blocks Telegram polling. It reuses
-the existing paper-trading SL/TP and trailing-stop logic from the
-handler layer rather than duplicating it.
+the shared paper-trading SL/TP and trailing-stop logic from
+:mod:`trader.paper.lifecycle` rather than duplicating it.
 
 Guardian Mode: the monitor never bypasses any risk check. It only
 performs exit actions that the existing /analyze flow already performs
@@ -29,6 +29,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from market.analyzer import get_current_price
+from trader.paper.lifecycle import (
+    apply_trailing_stop_to_position,
+    default_state_path as lifecycle_default_state_path,
+    paper_position_check,
+)
 
 if TYPE_CHECKING:
     from alerts.manager import AlertManager
@@ -41,22 +46,14 @@ _SltpCheckFn = Callable[..., object]
 _TrailingFn = Callable[..., object | None]
 
 
-def _default_sltp_check():
-    """Lazily import the position-scoped SL/TP check from handlers."""
-    from telegram_bot.handlers import _paper_position_check as _fn
-    return _fn
-
-
-def _default_trailing():
-    """Lazily import the position-scoped trailing-stop helper."""
-    from telegram_bot.handlers import _apply_trailing_stop_to_position as _fn
-    return _fn
-
-
 def _default_state_path():
-    """Lazily import the handler layer's paper state path."""
-    from telegram_bot.handlers import PAPER_STATE_PATH as _path
-    return _path
+    """Return the shared paper state path.
+
+    The lifecycle module owns the path; the command handler layer
+    registers its own patchable value with it at import time, so both
+    layers always agree on one state file.
+    """
+    return lifecycle_default_state_path()
 
 
 class PaperPositionMonitor:
@@ -64,7 +61,7 @@ class PaperPositionMonitor:
 
     The monitor periodically checks every open paper position for
     stop-loss / take-profit breaches and trailing-stop updates,
-    using the existing handler logic from :mod:`telegram_bot.handlers`.
+    using the shared lifecycle rules from :mod:`trader.paper.lifecycle`.
 
     The monitor runs as an asyncio task in the Telegram event loop, so
     it never blocks Telegram polling. AlertManager coroutine methods
@@ -107,21 +104,21 @@ class PaperPositionMonitor:
                 cycles. Must be positive.
             sltp_check: Optional override for the SL/TP check function.
                 It is called as ``sltp_check(service, position, price)``
-                with the exact position being monitored. Defaults to the
-                position-scoped handler helper.
+                with the exact position being monitored. Defaults to
+                :func:`trader.paper.lifecycle.paper_position_check`.
             trailing_fn: Optional override for the trailing-stop function.
                 It is called as ``trailing_fn(service, position, price)``
-                with the exact position being monitored. Defaults to the
-                position-scoped handler helper.
+                with the exact position being monitored. Defaults to
+                :func:`trader.paper.lifecycle.apply_trailing_stop_to_position`.
             price_provider: Optional synchronous callable returning a
                 fresh market price for a symbol, or None when no reliable
                 price is available. It is invoked in a worker thread so a
                 slow lookup never blocks the event loop. Defaults to
                 :func:`market.analyzer.get_current_price`.
             state_path: Optional path used to persist recorded market
-                marks. Defaults to the handler layer's
-                ``PAPER_STATE_PATH``, resolved lazily so the monitor and
-                the command handlers always share one state file.
+                marks. Defaults to the lifecycle module's shared state
+                path, resolved lazily so the monitor and the command
+                handlers always share one state file.
         """
         if interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")
@@ -131,8 +128,10 @@ class PaperPositionMonitor:
         self._interval = float(interval_seconds)
 
         # Allow tests to inject mock SL/TP and trailing-stop functions.
-        self._sltp_check = sltp_check or _default_sltp_check()
-        self._trailing_fn = trailing_fn or _default_trailing()
+        self._sltp_check = sltp_check or paper_position_check
+        self._trailing_fn = (
+            trailing_fn or apply_trailing_stop_to_position
+        )
 
         # Market price source. The default reuses the existing CoinGecko
         # integration; tests inject a deterministic provider.

@@ -6,7 +6,6 @@ All user-facing command logic lives here.
 import logging
 import math
 from datetime import datetime
-from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +58,20 @@ from trader.paper.entry_gates import (
     collect_entry_gate_metrics,
     evaluate_entry_gates,
 )
+from trader.paper.lifecycle import (
+    PAPER_STATE_PATH as DEFAULT_PAPER_STATE_PATH,
+    apply_trailing_stop,
+    apply_trailing_stop_to_position,
+    before_analysis_paper_check,
+    bind_state_path,
+    close_paper_position_for,
+    initial_risk_distance,
+    is_trail_active,
+    mark_trail_active,
+    paper_position_check,
+    record_market_mark,
+    valid_price,
+)
 from trader.paper.mark_freshness import (
     MarksFreshnessResult,
     check_marks_freshness,
@@ -86,8 +99,11 @@ from telegram_bot.rate_limit import (
     reset_rate_limit_state,
 )
 
-# Path for persisting paper account state
-PAPER_STATE_PATH = Path("logs/paper_state.json")
+# Path for persisting paper account state. The value is shared with the
+# paper lifecycle module through a call-time provider, so patching this
+# attribute keeps redirecting handler and monitor writes alike.
+PAPER_STATE_PATH = DEFAULT_PAPER_STATE_PATH
+bind_state_path(lambda: PAPER_STATE_PATH)
 
 # Module-level rate-limit configuration. This is built once at import time
 # from settings, but the helper uses the live settings values so tests can
@@ -235,22 +251,8 @@ def _resolve_trading_policy(
 
 
 def _valid_current_price(value: object) -> float | None:
-    """Return a usable execution price, or None.
-
-    Only a finite, strictly positive number is accepted. Anything else
-    (missing, bool, string, zero, negative, NaN, infinity) means no
-    current quote and blocks the trade.
-    """
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    try:
-        if not math.isfinite(value) or value <= 0:
-            return None
-        return float(value)
-    except (OverflowError, ValueError):
-        # An int too large for a float is not a usable price; never let
-        # the monitor crash on malformed data.
-        return None
+    """Return a usable execution price, or None."""
+    return valid_price(value)
 
 
 def _current_quote(symbol: str) -> float | None:
@@ -359,50 +361,28 @@ def _format_pnl_label(order: PaperOrder) -> str:
     return "BREAKEVEN"
 
 
+# ---------------------------------------------------------------------------
+# Paper position lifecycle
+# ---------------------------------------------------------------------------
+# The lifecycle rules (market marks, SL/TP checks, trailing stops) live in
+# trader.paper.lifecycle so the background monitor and the command handlers
+# share one implementation. The helpers below are the handler layer's
+# patchable entry points: they forward the module's PAPER_STATE_PATH, so
+# monkeypatching it still redirects every state write.
+
+
 def _apply_trailing_stop(
     service: PaperTradingService, symbol: str, current_price: float
 ) -> tuple[bool, float | None, float | None] | None:
-    """Apply trailing stop logic to the first open position for a symbol.
-
-    This is the analysis-flow wrapper around
-    :func:`_apply_trailing_stop_to_position`. The background monitor uses
-    the position-scoped function directly so several positions on one
-    symbol are never confused with each other.
-    """
-    position = service.get_position(symbol)
-    if position is None:
-        return None
-    return _apply_trailing_stop_to_position(
-        service, position, current_price
+    """Apply trailing stop logic to the first open position for a symbol."""
+    return apply_trailing_stop(
+        service, symbol, current_price, state_path=PAPER_STATE_PATH
     )
 
 
 def _initial_risk_distance(position: object) -> float | None:
-    """Return the fixed entry-to-stop risk distance for a position.
-
-    New positions record ``initial_risk_distance`` when they are placed.
-    Legacy saved positions do not have that field, so the original
-    stop-loss on the stored trade reference is used when available. The
-    original distance must never be recalculated from a stop that has
-    already trailed.
-    """
-    stored = _valid_current_price(
-        getattr(position, "initial_risk_distance", None)
-    )
-    if stored is not None:
-        return stored
-
-    trade = getattr(position, "trade", None)
-    if trade is None:
-        return None
-
-    original_stop = _valid_current_price(getattr(trade, "stop_loss", None))
-    entry = _valid_current_price(getattr(position, "entry_price", None))
-    if original_stop is None or entry is None:
-        return None
-
-    distance = abs(entry - original_stop)
-    return distance if distance > 0 else None
+    """Return the fixed entry-to-stop risk distance for a position."""
+    return initial_risk_distance(position)
 
 
 def _apply_trailing_stop_to_position(
@@ -410,212 +390,33 @@ def _apply_trailing_stop_to_position(
     position: PaperOrder,
     current_price: float,
 ) -> tuple[bool, float | None, float | None] | None:
-    """Apply trailing stop logic to one exact open paper position.
-
-    Runs during /analyze and from the background monitor using the
-    already-fetched market price. No additional market API calls are
-    made, and only the supplied position can be modified.
-
-    Behavior:
-        - For LONG: if price moves above entry by at least 1R, where 1R
-          is the original entry-to-stop distance captured when the
-          position was opened, activate trailing and move the stop to
-          break-even (or keep an already tighter stop). After
-          activation, trail the stop upward by that same fixed distance
-          as price rises, never moving it backward.
-        - For SHORT: mirror behavior — activate at 1R profit, then trail
-          downward, never raising an already tighter stop.
-        - Never moves the stop backward.
-        - Never modifies take profit.
-        - Activation always saves the paper account so the trailing
-          marker and initial risk distance survive a restart. After
-          activation, saves only when the stop actually changes.
-
-    Args:
-        service: The paper trading service.
-        position: The exact open position to evaluate and trail.
-        current_price: The current market price from the ongoing
-            analysis. Must already be fetched; this function does not
-            fetch prices itself.
-
-    Returns:
-        None when there is no position, no valid stop loss, or
-        no trailing action is warranted.
-        Otherwise a tuple of (changed, old_stop, new_stop) where
-        changed indicates whether the stop was modified and the old/new
-        stop values are provided for reporting.
-    """
-    if position is None:
-        return None
-
-    # Defensive: skip if there is no valid stop loss to trail
-    if not position.stop_loss or position.stop_loss <= 0:
-        return None
-
-    side = (
-        position.side.value
-        if hasattr(position.side, "value")
-        else str(position.side).upper()
+    """Apply trailing stop logic to one exact open paper position."""
+    return apply_trailing_stop_to_position(
+        service, position, current_price, state_path=PAPER_STATE_PATH
     )
-    entry = position.entry_price
-    stop = position.stop_loss
-
-    # Use the risk distance captured when the position was opened. For
-    # legacy positions without it, fall back to the current stop only
-    # while trailing has not moved that stop yet.
-    stop_distance = _initial_risk_distance(position)
-    if stop_distance is None:
-        try:
-            fallback_distance = abs(float(entry) - float(stop))
-        except (TypeError, ValueError, OverflowError):
-            return None
-        stop_distance = _valid_current_price(fallback_distance)
-    if stop_distance is None:
-        return None
-
-    # Backfill legacy positions as soon as the original distance is known,
-    # so it survives the next save instead of being re-derived forever.
-    # Treat an invalid stored value the same as a missing one so a bad
-    # value can never be persisted again.
-    if (
-        _valid_current_price(
-            getattr(position, "initial_risk_distance", None)
-        )
-        is None
-    ):
-        position.initial_risk_distance = stop_distance
-
-    # 1R threshold: entry plus/minus one original stop-loss distance
-    if side == "LONG":
-        one_r_price = entry + stop_distance
-        # Not yet in 1R profit (strictly below threshold)
-        if current_price <= one_r_price:
-            return None
-
-        # First time crossing 1R → lock at break-even, but never lower
-        # a stop that is already tighter than entry (manual/legacy).
-        if not _is_trail_active(position):
-            new_stop = max(stop, entry)
-            old_stop = stop
-            position.stop_loss = new_stop
-            position.initial_risk_distance = stop_distance
-            _mark_trail_active(position)
-            # Always persist activation so the marker and the original
-            # risk distance survive a restart, even if the stop was
-            # already at breakeven.
-            service.save_account(PAPER_STATE_PATH)
-            return (True, old_stop, new_stop)
-
-        # Already trail-active — move stop up only if price allows,
-        # and only if it improves the stop (never backward).
-        new_stop = max(stop, current_price - stop_distance)
-        if new_stop > stop:
-            old_stop = stop
-            position.stop_loss = new_stop
-            service.save_account(PAPER_STATE_PATH)
-            return (True, old_stop, new_stop)
-        return None
-
-    else:
-        # SHORT (and any non-LONG side): mirror the logic.
-        one_r_price = entry - stop_distance
-        if current_price >= one_r_price:
-            return None
-
-        if not _is_trail_active(position):
-            new_stop = min(stop, entry)
-            old_stop = stop
-            position.stop_loss = new_stop
-            position.initial_risk_distance = stop_distance
-            _mark_trail_active(position)
-            # Always persist activation so the marker and the original
-            # risk distance survive a restart, even if the stop was
-            # already at breakeven.
-            service.save_account(PAPER_STATE_PATH)
-            return (True, old_stop, new_stop)
-
-        new_stop = min(stop, current_price + stop_distance)
-        if new_stop < stop:
-            old_stop = stop
-            position.stop_loss = new_stop
-            service.save_account(PAPER_STATE_PATH)
-            return (True, old_stop, new_stop)
-        return None
 
 
 def _is_trail_active(position: object) -> bool:
-    """Return True when the position's trailing stop is already active.
-
-    Uses a notes-entry marker so trailing state survives serialization
-    through the JSON storage layer without requiring changes to the
-    PaperOrder dataclass.
-    """
-    notes = getattr(position, "notes", None) or []
-    return any(
-        isinstance(n, str) and n == "trailing_active" for n in notes
-    )
+    """Return True when the position's trailing stop is already active."""
+    return is_trail_active(position)
 
 
 def _mark_trail_active(position: object) -> None:
-    """Mark the position as having an active trailing stop.
-
-    Stores a marker string in the order's notes list so the state
-    survives JSON round-trips.
-    """
-    notes = getattr(position, "notes", None)
-    if notes is None:
-        notes = []
-        position.notes = notes
-    if "trailing_active" not in notes:
-        notes.append("trailing_active")
+    """Mark the position as having an active trailing stop."""
+    mark_trail_active(position)
 
 
 def _record_market_mark(position: object, current_price: object) -> bool:
-    """Record a validated current market price on a paper position.
-
-    The price handed in already comes from the analysis flow, so this
-    adds no network request. The position's own mark mechanism rejects
-    unusable values, and objects without it (test doubles, legacy
-    shapes) are left untouched.
-
-    Args:
-        position: The open paper position to mark.
-        current_price: The current market price from the analysis flow.
-
-    Returns:
-        True when the mark was recorded, False otherwise.
-    """
-    marker = getattr(position, "mark_to_market", None)
-    if not callable(marker):
-        return False
-    try:
-        return bool(marker(current_price))
-    except (TypeError, ValueError):
-        return False
+    """Record a validated current market price on a paper position."""
+    return record_market_mark(position, current_price)
 
 
 def _before_analysis_paper_check(
     service: PaperTradingService, symbol: str, current_price: float
 ) -> PaperOrder | None:
-    """Check the first open position for a symbol for SL/TP breach.
-
-    This is the analysis-flow wrapper around
-    :func:`_paper_position_check`. The background monitor uses the
-    position-scoped function directly so it can never close a different
-    position than the one it is processing.
-
-    Runs BEFORE any new order is placed for the current analysis.
-    Only evaluates positions that existed before this /analyze request.
-    If the current price hits the stop loss, close with STOPPED.
-    If the current price hits the take profit, close with TAKEN_PROFIT.
-    Stop loss takes priority over take profit (Guardian Mode: protect capital).
-    Returns the closed order if a closure happened, else None.
-    """
-    existing = service.get_position(symbol)
-    if existing is None:
-        return None
-    return _paper_position_check(
-        service, existing, current_price, by_id=False, symbol=symbol
+    """Check the first open position for a symbol for SL/TP breach."""
+    return before_analysis_paper_check(
+        service, symbol, current_price, state_path=PAPER_STATE_PATH
     )
 
 
@@ -627,86 +428,15 @@ def _paper_position_check(
     by_id: bool = True,
     symbol: str | None = None,
 ) -> PaperOrder | None:
-    """Check one exact open paper position for a stop-loss / take-profit.
-
-    Only ``position`` is marked, evaluated, and (if breached) closed, so
-    other positions on the same symbol are untouched. Stop loss takes
-    priority over take profit (Guardian Mode: protect capital).
-
-    Args:
-        service: The paper trading service.
-        position: The exact position to evaluate.
-        current_price: The already-fetched market price for the symbol.
-        by_id: When True (the monitor path), close the exact order id.
-            When False, keep the analysis flow's historical behaviour of
-            closing by symbol.
-        symbol: Symbol to pass to the symbol-based close path. Defaults
-            to the position's own symbol.
-
-    Returns:
-        The closed order if a closure happened, else None.
-    """
-    if position is None:
-        return None
-
-    # Record the analysis price as this position's market mark before any
-    # exit decision. The price was already fetched for the analysis, so
-    # this adds no blocking network request.
-    _record_market_mark(position, current_price)
-
-    side = (
-        position.side.value.upper()
-        if hasattr(position.side, "value")
-        else str(position.side).upper()
+    """Check one exact open paper position for a stop-loss / take-profit."""
+    return paper_position_check(
+        service,
+        position,
+        current_price,
+        by_id=by_id,
+        symbol=symbol,
+        state_path=PAPER_STATE_PATH,
     )
-
-    # Guard: no valid SL/TP levels configured
-    if position.stop_loss <= 0 and position.take_profit <= 0:
-        return None
-
-    closed_order: PaperOrder | None = None
-
-    # For LONG: SL is below entry, TP is above → price must drop to hit SL,
-    # rise to hit TP.
-    # For SHORT: SL is above entry, TP is below → price must rise to hit SL,
-    # drop to hit TP.
-    if side == "LONG":
-        sl_hit = position.stop_loss > 0 and current_price <= position.stop_loss
-        tp_hit = (
-            position.take_profit > 0 and current_price >= position.take_profit
-        )
-    else:
-        # SHORT (and any non-LONG side): invert the comparisons
-        sl_hit = position.stop_loss > 0 and current_price >= position.stop_loss
-        tp_hit = (
-            position.take_profit > 0 and current_price <= position.take_profit
-        )
-
-    if sl_hit:
-        # Stop loss hit — close at stop loss price (Guardian Mode priority)
-        closed_order = _close_paper_position_for(
-            service,
-            position,
-            position.stop_loss,
-            PaperOrderStatus.STOPPED,
-            by_id=by_id,
-            symbol=symbol,
-        )
-    elif tp_hit:
-        # Take profit hit — close at take profit price
-        closed_order = _close_paper_position_for(
-            service,
-            position,
-            position.take_profit,
-            PaperOrderStatus.TAKEN_PROFIT,
-            by_id=by_id,
-            symbol=symbol,
-        )
-
-    if closed_order is not None:
-        service.save_account(PAPER_STATE_PATH)
-
-    return closed_order
 
 
 def _close_paper_position_for(
@@ -719,12 +449,13 @@ def _close_paper_position_for(
     symbol: str | None = None,
 ) -> PaperOrder | None:
     """Close either the exact order id or the first position by symbol."""
-    if by_id:
-        return service.close_position_by_id(
-            position.order_id, exit_price, status
-        )
-    return service.close_position(
-        symbol or position.symbol, exit_price, status
+    return close_paper_position_for(
+        service,
+        position,
+        exit_price,
+        status,
+        by_id=by_id,
+        symbol=symbol,
     )
 
 
