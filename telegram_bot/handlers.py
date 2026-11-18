@@ -91,6 +91,12 @@ from telegram_bot.analyze_reporting import (
     entry_gate_rejection_message,
     format_pnl_value as _format_pnl_value,
 )
+from trader.paper.analysis_service import (
+    PAPER_STATUSES,
+    AnalysisRun,
+    AnalysisStatus,
+    run_analysis_pipeline,
+)
 from telegram_bot.auth import authorization_status
 from telegram_bot.settings_report import format_settings_message
 from telegram_bot.rate_limit import (
@@ -564,6 +570,93 @@ async def _dispatch_entry_gate_alerts(trade, outcome) -> None:
     )
 
 
+def _format_analysis_message(run: AnalysisRun) -> str:
+    """Render the Telegram reply for one /analyze orchestration result.
+
+    All message text lives here: the orchestration service returns a
+    structured result and never formats user-facing output.
+    """
+    if run.status is AnalysisStatus.QUOTE_UNAVAILABLE:
+        return _quote_unavailable_message(run.analysis)
+    if run.status is AnalysisStatus.STALE_MARKS:
+        return _stale_mark_message(run.analysis, run.stale_block)
+    if run.status is AnalysisStatus.SIZING_UNAVAILABLE:
+        return _sizing_unavailable_message(run.coin)
+
+    trade = run.trade
+    message = (
+        f"📊 Analysis for {trade.symbol}\n\n"
+        f"Price: {trade.price}\n"
+        f"Trend: {trade.trend}\n"
+        f"Signal: {trade.signal}\n"
+        f"Confidence: {trade.confidence}%\n\n"
+        f"🧠 Decision: {trade.decision}\n"
+    )
+
+    if not trade.approved:
+        message += f"🛑 Risk: {trade.risk_verdict}\n"
+        if trade.risk_reasons:
+            message += "\n".join(
+                f"• {reason}" for reason in trade.risk_reasons
+            )
+        return message
+
+    message += (
+        f"✅ Risk: {trade.risk_verdict}\n"
+        f"💰 Position Size: {trade.position_size}\n"
+        f"🛑 Stop Loss: {trade.stop_loss}\n"
+        f"🎯 Take Profit: {trade.take_profit}\n"
+    )
+
+    if run.status not in PAPER_STATUSES:
+        return message
+
+    if run.sltp_closed is not None:
+        sltp_closed = run.sltp_closed
+        message += (
+            f"\n📄 Paper Order: CLOSED (SL/TP)\n"
+            f"   Symbol: {sltp_closed.symbol}\n"
+            f"   Side: {sltp_closed.side.value}\n"
+            f"   Exit Price: ${sltp_closed.exit_price:.2f}\n"
+            f"   Exit Status: {paper_exit_status(sltp_closed)}\n"
+            f"   Realized PnL: ${sltp_closed.realized_pnl:.2f} "
+            f"({_format_pnl_label(sltp_closed)})"
+        )
+
+    if run.trail_result is not None:
+        _, old_stop, new_stop = run.trail_result
+        message += (
+            f"\n📄 Paper Order: TRAILING STOP UPDATED\n"
+            f"   Symbol: {trade.symbol}\n"
+            f"   Stop Loss: ${old_stop:.2f} → ${new_stop:.2f}"
+        )
+
+    if run.status is AnalysisStatus.GATE_REJECTED:
+        message += _entry_gate_rejection_message(trade, run.gate_outcome)
+    elif run.status is AnalysisStatus.PAPER_PLACED:
+        paper_order = run.paper_order
+        message += (
+            f"\n📄 Paper Order: PLACED\n"
+            f"   Order ID: {paper_order.order_id}\n"
+            f"   Status: {paper_order.status.value}\n"
+            f"   Quantity: {paper_order.quantity}\n"
+            f"   Entry: ${paper_order.entry_price:.2f}\n"
+            f"   Stop Loss: ${paper_order.stop_loss:.2f}\n"
+            f"   Take Profit: ${paper_order.take_profit:.2f}\n"
+            f"   Side: {paper_order.side.value}"
+        )
+    elif run.status is AnalysisStatus.PAPER_FAILED:
+        message += (
+            "\n\n❌ Paper Execution Failed\n"
+            "   The paper trading step did not complete.\n"
+            "   No confirmed order is reported as placed.\n"
+            "   Check /positions before retrying; "
+            "see the bot logs for details."
+        )
+
+    return message
+
+
 async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Analyze a cryptocurrency through the full Guardian Mode pipeline."""
     if not check_rate_limit(update.effective_chat.id, _rate_limit_config):
@@ -581,208 +674,40 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     # One strategy instance drives analysis and the decision; the risk
-    # profile is resolved only after the quote and freshness gates below,
-    # so paper equity is fresh at the moment sizing happens.
-    strategy = DEFAULT_STRATEGY_PARAMETERS
-    result = analyze_coin(coin, parameters=strategy)
-
-    # Historical candles drive trend/signal/confidence, but the trade must
-    # be priced from a fresh market quote. The chart's last close is a
-    # historical observation, not a current execution price.
-    quote = _current_quote(result.get("symbol", coin))
-    if quote is None:
-        logger.warning(
-            "No usable current market quote for %s; trade blocked.",
-            result.get("symbol", coin),
-        )
-        await update.message.reply_text(_quote_unavailable_message(result))
-        return
-
-    result = {**result, "price": quote}
-    decision = make_decision(result, parameters=strategy)
-
-    # Refuse to size a new trade from stale or missing market marks. This
-    # runs before sizing so no fallback balance can be used.
-    mark_block = _paper_mark_block()
-    if mark_block is not None:
-        logger.warning(
-            "Paper trade for %s blocked: stale or missing market marks (%s).",
-            result.get("symbol"),
-            mark_block.reason,
-        )
-        await update.message.reply_text(
-            _stale_mark_message(result, mark_block)
-        )
-        return
-
-    # Paper equity is read here, immediately before sizing, from the same
-    # account whose marks were just verified. The strategy instance that
-    # produced the signal is carried unchanged, and no fallback balance is
-    # substituted when equity is unavailable.
-    policy = _resolve_trading_policy(strategy)
-    if policy is None:
-        logger.warning(
-            "Paper account equity is unavailable for %s; trade blocked.",
-            result.get("symbol", coin),
-        )
-        await update.message.reply_text(_sizing_unavailable_message(coin))
-        return
-
-    verdict = validate_trade(decision, result, policy.risk_profile)
-    trade = build_trade(result, verdict, policy.risk_profile)
-    log_trade(
-        trade.symbol,
-        trade.decision,
-        trade.risk_verdict,
+    # profile is resolved only after the quote and freshness gates, so
+    # paper equity is fresh at the moment sizing happens. Every
+    # dependency is resolved here, at call time, so this module's
+    # patchable surface stays authoritative.
+    run = await run_analysis_pipeline(
+        coin,
+        strategy=DEFAULT_STRATEGY_PARAMETERS,
+        paper_trading_enabled=settings.PAPER_TRADING,
+        analyze_coin=analyze_coin,
+        current_quote=_current_quote,
+        make_decision=make_decision,
+        paper_mark_block=_paper_mark_block,
+        resolve_trading_policy=_resolve_trading_policy,
+        validate_trade=validate_trade,
+        build_trade=build_trade,
+        log_trade=log_trade,
+        paper_service_factory=_get_paper_service,
+        before_analysis_paper_check=_before_analysis_paper_check,
+        apply_trailing_stop=_apply_trailing_stop,
+        evaluate_entry_gates=evaluate_entry_gates,
+        state_path=PAPER_STATE_PATH,
+        dispatch_alert=_dispatch_alert,
+        dispatch_entry_gate_alerts=_dispatch_entry_gate_alerts,
+        portfolio_risk_limit=settings.PORTFOLIO_RISK_LIMIT,
+        portfolio_exposure_limit=settings.PORTFOLIO_EXPOSURE_LIMIT,
+        daily_loss_limit=settings.PORTFOLIO_DAILY_LOSS_LIMIT,
+        max_open_positions=settings.PORTFOLIO_MAX_OPEN_POSITIONS,
+        max_positions_per_symbol=(
+            settings.PORTFOLIO_MAX_POSITIONS_PER_SYMBOL
+        ),
+        max_exposure_per_symbol=settings.PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL,
     )
 
-    message = (
-        f"📊 Analysis for {trade.symbol}\n\n"
-        f"Price: {trade.price}\n"
-        f"Trend: {trade.trend}\n"
-        f"Signal: {trade.signal}\n"
-        f"Confidence: {trade.confidence}%\n\n"
-        f"🧠 Decision: {trade.decision}\n"
-    )
-
-    if trade.approved:
-        message += (
-            f"✅ Risk: {trade.risk_verdict}\n"
-            f"💰 Position Size: {trade.position_size}\n"
-            f"🛑 Stop Loss: {trade.stop_loss}\n"
-            f"🎯 Take Profit: {trade.take_profit}\n"
-        )
-
-        # Paper trading integration
-        if settings.PAPER_TRADING:
-            try:
-                service = _get_paper_service()
-
-                # Check pre-existing positions for SL/TP breach BEFORE placing
-                # any new order. This ensures we never evaluate the order that
-                # is about to be opened in this same request.
-                sltp_closed = _before_analysis_paper_check(
-                    service, trade.symbol, trade.price
-                )
-                if sltp_closed is not None:
-                    message += (
-                        f"\n📄 Paper Order: CLOSED (SL/TP)\n"
-                        f"   Symbol: {sltp_closed.symbol}\n"
-                        f"   Side: {sltp_closed.side.value}\n"
-                        f"   Exit Price: ${sltp_closed.exit_price:.2f}\n"
-                        f"   Exit Status: {paper_exit_status(sltp_closed)}\n"
-                        f"   Realized PnL: ${sltp_closed.realized_pnl:.2f} "
-                        f"({_format_pnl_label(sltp_closed)})"
-                    )
-                    # Sprint 9A: push an SL/TP alert (never raises).
-                    exit_value = paper_exit_status(sltp_closed)
-                    if exit_value == PaperOrderStatus.STOPPED.value:
-                        await _dispatch_alert(
-                            "stop_loss_triggered", sltp_closed
-                        )
-                    elif exit_value == PaperOrderStatus.TAKEN_PROFIT.value:
-                        await _dispatch_alert(
-                            "take_profit_triggered", sltp_closed
-                        )
-
-                # Apply trailing stop to any pre-existing position
-                # before placing a new order. This runs after the
-                # SL/TP closure check so a just-closed position is not
-                # re-evaluated, and before place_trade so the new order
-                # being opened in this request is never subject to
-                # trailing in the same call.
-                trail_result = _apply_trailing_stop(
-                    service, trade.symbol, trade.price
-                )
-                if trail_result is not None:
-                    changed, old_stop, new_stop = trail_result
-                    message += (
-                        f"\n📄 Paper Order: TRAILING STOP UPDATED\n"
-                        f"   Symbol: {trade.symbol}\n"
-                        f"   Stop Loss: ${old_stop:.2f} → ${new_stop:.2f}"
-                    )
-                    # Sprint 9A: push a trailing-stop alert (never raises).
-                    await _dispatch_alert(
-                        "trailing_stop_updated", trade.symbol, old_stop, new_stop
-                    )
-
-                # Portfolio safety gates (Sprints 7A-8B): run after the
-                # SL/TP closure check and the trailing stop update, but
-                # before placing any new order. One domain evaluator owns
-                # the gate order and thresholds; it stops at the first
-                # rejection, so the reported rule is always the
-                # highest-precedence failing gate. A limit that is not
-                # configured (<= 0) skips its gate entirely.
-                gate_outcome = evaluate_entry_gates(
-                    service.execution_backend(),
-                    trade,
-                    portfolio_risk_limit=settings.PORTFOLIO_RISK_LIMIT,
-                    portfolio_exposure_limit=(
-                        settings.PORTFOLIO_EXPOSURE_LIMIT
-                    ),
-                    daily_loss_limit=settings.PORTFOLIO_DAILY_LOSS_LIMIT,
-                    max_open_positions=(
-                        settings.PORTFOLIO_MAX_OPEN_POSITIONS
-                    ),
-                    max_positions_per_symbol=(
-                        settings.PORTFOLIO_MAX_POSITIONS_PER_SYMBOL
-                    ),
-                    max_exposure_per_symbol=(
-                        settings.PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL
-                    ),
-                )
-                if not gate_outcome.allowed:
-                    message += _entry_gate_rejection_message(
-                        trade, gate_outcome
-                    )
-                    # Sprint 9A: push the gate's rejection alerts, in the
-                    # same order and count as the inline checks used.
-                    await _dispatch_entry_gate_alerts(trade, gate_outcome)
-                    await update.message.reply_text(message)
-                    return
-
-                # Now place the new trade (if still approved)
-                paper_order = service.place_trade(trade)
-                if paper_order is not None:
-                    service.save_account(PAPER_STATE_PATH)
-                    message += (
-                        f"\n📄 Paper Order: PLACED\n"
-                        f"   Order ID: {paper_order.order_id}\n"
-                        f"   Status: {paper_order.status.value}\n"
-                        f"   Quantity: {paper_order.quantity}\n"
-                        f"   Entry: ${paper_order.entry_price:.2f}\n"
-                        f"   Stop Loss: ${paper_order.stop_loss:.2f}\n"
-                        f"   Take Profit: ${paper_order.take_profit:.2f}\n"
-                        f"   Side: {paper_order.side.value}"
-                    )
-                    # Sprint 9A: push an order-placed alert (never raises).
-                    await _dispatch_alert("order_placed", paper_order)
-            except Exception as exc:
-                # A paper-trading failure must not break the analysis reply,
-                # but it must never look like a successful placement either.
-                # Log the full traceback for diagnosis, and tell the user
-                # plainly that no order was confirmed. Exception details are
-                # not echoed to Telegram: they can contain account internals.
-                logger.exception(
-                    "Paper trading integration failed during /analyze "
-                    "for %s: %s",
-                    trade.symbol,
-                    exc,
-                )
-                message += (
-                    "\n\n❌ Paper Execution Failed\n"
-                    "   The paper trading step did not complete.\n"
-                    "   No confirmed order is reported as placed.\n"
-                    "   Check /positions before retrying; "
-                    "see the bot logs for details."
-                )
-
-    else:
-        message += f"🛑 Risk: {trade.risk_verdict}\n"
-        if trade.risk_reasons:
-            message += "\n".join(f"• {reason}" for reason in trade.risk_reasons)
-
-    await update.message.reply_text(message)
+    await update.message.reply_text(_format_analysis_message(run))
 
 
 # ---------------------------------------------------------------------------
