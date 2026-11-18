@@ -307,11 +307,19 @@ def _configure_and_run_analyze(
         service.get_position.return_value = None
         service.place_trade.return_value = place_trade_return
 
-        monkeypatch.setattr(h, "analyze_coin", lambda _: analyze_coin_return)
+        monkeypatch.setattr(
+            h,
+            "analyze_coin",
+            lambda _symbol, *, parameters=None: analyze_coin_return,
+        )
         monkeypatch.setattr(
             h, "get_current_price", lambda _: analyze_coin_return["price"]
         )
-        monkeypatch.setattr(h, "make_decision", lambda r: make_decision_return)
+        monkeypatch.setattr(
+            h,
+            "make_decision",
+            lambda r, *, parameters=None: make_decision_return,
+        )
         monkeypatch.setattr(h, "validate_trade", lambda d, r, p: validate_trade_return)
         monkeypatch.setattr(h, "build_trade", lambda r, v, p: fake_trade)
         monkeypatch.setattr(h, "log_trade", log_trade_return)
@@ -643,12 +651,19 @@ def _run_analyze_with_real_service(
         monkeypatch.setattr(
             h,
             "analyze_coin",
-            lambda _: {"symbol": new_trade.symbol, "price": new_trade.price},
+            lambda _symbol, *, parameters=None: {
+                "symbol": new_trade.symbol,
+                "price": new_trade.price,
+            },
         )
         monkeypatch.setattr(
             h, "get_current_price", lambda _: new_trade.price
         )
-        monkeypatch.setattr(h, "make_decision", lambda r: MagicMock(approved=True))
+        monkeypatch.setattr(
+            h,
+            "make_decision",
+            lambda r, *, parameters=None: MagicMock(approved=True),
+        )
         monkeypatch.setattr(
             h, "validate_trade", lambda d, r, p: MagicMock(approved=True)
         )

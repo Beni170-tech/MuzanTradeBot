@@ -115,10 +115,25 @@ def test_signal_on_final_bar_creates_no_trade(monkeypatch):
     assert simulate_trades("BTC", bars, PROFILE) == []
 
 
+def _unvalidated_profile(**overrides):
+    """Build a RiskProfile while bypassing its constructor validation."""
+    profile = object.__new__(RiskProfile)
+    values = {
+        "balance": 1000.0,
+        "risk_percent": 2.0,
+        "stop_loss_percent": 2.0,
+        "take_profit_percent": 4.0,
+    }
+    values.update(overrides)
+    for name, value in values.items():
+        object.__setattr__(profile, name, value)
+    return profile
+
+
 def test_blocked_risk_verdict_creates_no_trade(monkeypatch):
     bars = _bars([100.0, 110.0, 120.0])
     _patch_replay(monkeypatch, bars, ["BUY", "WAIT", "WAIT"])
-    blocked_profile = RiskProfile(balance=0.0)
+    blocked_profile = _unvalidated_profile(balance=0.0)
 
     assert simulate_trades("BTC", bars, blocked_profile) == []
 

@@ -3,6 +3,10 @@
 import pytest
 
 import market.analyzer as analyzer
+from strategy.parameters import (
+    DEFAULT_STRATEGY_PARAMETERS,
+    StrategyParameters,
+)
 
 
 def _uptrend(n=250, growth=0.001, start=100.0):
@@ -76,3 +80,111 @@ def test_unsupported_coin_returns_placeholder_without_fetching(monkeypatch):
     assert result["symbol"] == "XRP"
     assert result["price"] == "Unknown"
     assert result["signal"] == "WAIT"
+
+
+def test_parameters_are_forwarded_to_compute_analysis(monkeypatch):
+    closes = _uptrend()
+    monkeypatch.setattr(
+        analyzer,
+        "_fetch_market_chart",
+        lambda symbol: (closes, [1_000_000.0] * len(closes)),
+    )
+    captured = {}
+
+    def fake_compute(received_closes, volumes=None, *, parameters=None):
+        captured["parameters"] = parameters
+        return {
+            "trend": "Bullish",
+            "signal": "BUY",
+            "confidence": 88,
+            "indicators": None,
+        }
+
+    monkeypatch.setattr(analyzer, "compute_analysis", fake_compute)
+    custom = StrategyParameters(min_candles=200)
+
+    result = analyzer.analyze_coin("BTC", parameters=custom)
+
+    assert captured["parameters"] is custom
+    assert result["signal"] == "BUY"
+    assert result["confidence"] == 88
+
+
+def test_omitted_parameters_forward_the_default_instance(monkeypatch):
+    closes = _uptrend()
+    monkeypatch.setattr(
+        analyzer,
+        "_fetch_market_chart",
+        lambda symbol: (closes, [1_000_000.0] * len(closes)),
+    )
+    captured = {}
+
+    def fake_compute(received_closes, volumes=None, *, parameters=None):
+        captured["parameters"] = parameters
+        return {
+            "trend": "Bullish",
+            "signal": "WAIT",
+            "confidence": 45,
+            "indicators": None,
+        }
+
+    monkeypatch.setattr(analyzer, "compute_analysis", fake_compute)
+
+    analyzer.analyze_coin("BTC")
+
+    assert captured["parameters"] is DEFAULT_STRATEGY_PARAMETERS
+
+
+@pytest.mark.parametrize(
+    ("min_candles", "expected_price"),
+    [(200, None), (300, "Unknown")],
+)
+def test_custom_min_candles_controls_insufficient_history(
+    monkeypatch, min_candles, expected_price
+):
+    closes = _uptrend()  # 250 bars
+    monkeypatch.setattr(
+        analyzer,
+        "_fetch_market_chart",
+        lambda symbol: (closes, [1_000_000.0] * len(closes)),
+    )
+
+    result = analyzer.analyze_coin(
+        "BTC",
+        parameters=StrategyParameters(min_candles=min_candles),
+    )
+
+    if expected_price is None:
+        assert result["price"] == pytest.approx(closes[-1])
+        assert result["trend"] != "Unknown"
+    else:
+        assert result["price"] == expected_price
+        assert result["trend"] == "Unknown"
+        assert result["signal"] == "WAIT"
+
+
+def test_omitted_parameters_preserve_existing_output(monkeypatch):
+    closes = _uptrend()
+    monkeypatch.setattr(
+        analyzer,
+        "_fetch_market_chart",
+        lambda symbol: (closes, [1_000_000.0] * len(closes)),
+    )
+
+    omitted = analyzer.analyze_coin("BTC")
+    explicit = analyzer.analyze_coin(
+        "BTC",
+        parameters=DEFAULT_STRATEGY_PARAMETERS,
+    )
+
+    assert omitted == explicit
+
+
+def test_invalid_parameters_type_is_rejected(monkeypatch):
+    def fake_fetch(symbol):
+        raise AssertionError("fetch must not be called")
+
+    monkeypatch.setattr(analyzer, "_fetch_market_chart", fake_fetch)
+
+    with pytest.raises(TypeError, match="parameters"):
+        analyzer.analyze_coin("BTC", parameters=object())

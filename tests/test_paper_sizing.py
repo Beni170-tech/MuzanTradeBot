@@ -19,6 +19,7 @@ import pytest
 import telegram_bot.handlers as handlers
 from config import settings as cfg_settings
 from risk.risk_profile import RiskProfile
+from strategy.parameters import DEFAULT_STRATEGY_PARAMETERS
 from trader.paper.order import PaperOrderStatus
 from trader.paper.service import PaperTradingService
 from trader.trade import Trade
@@ -111,11 +112,19 @@ def _run_analyze(monkeypatch, tmp_path, *, service, analysis=None) -> str:
         cfg_settings.settings.ALERTS_ENABLED = False
 
         monkeypatch.setattr(handlers, "check_rate_limit", lambda *a, **k: True)
-        monkeypatch.setattr(handlers, "analyze_coin", lambda _: dict(analysis))
+        monkeypatch.setattr(
+            handlers,
+            "analyze_coin",
+            lambda _symbol, *, parameters=None: dict(analysis),
+        )
         monkeypatch.setattr(
             handlers, "get_current_price", lambda _: analysis["price"]
         )
-        monkeypatch.setattr(handlers, "make_decision", lambda r: "BUY")
+        monkeypatch.setattr(
+            handlers,
+            "make_decision",
+            lambda r, *, parameters=None: "BUY",
+        )
         monkeypatch.setattr(handlers, "log_trade", MagicMock())
         monkeypatch.setattr(handlers, "_get_paper_service", lambda: service)
         monkeypatch.setattr(
@@ -162,9 +171,10 @@ def test_sizing_profile_uses_paper_equity(monkeypatch) -> None:
     monkeypatch.setattr(cfg_settings.settings, "PAPER_TRADING", True)
     monkeypatch.setattr(handlers, "_get_paper_service", lambda: service)
 
-    profile = handlers._sizing_profile()
+    policy = handlers._resolve_trading_policy(DEFAULT_STRATEGY_PARAMETERS)
 
-    assert profile.balance == pytest.approx(850.0)
+    assert policy.risk_profile.balance == pytest.approx(850.0)
+    assert policy.strategy is DEFAULT_STRATEGY_PARAMETERS
 
 
 def test_sizing_profile_includes_unrealized_marks(monkeypatch) -> None:
@@ -174,7 +184,9 @@ def test_sizing_profile_includes_unrealized_marks(monkeypatch) -> None:
     monkeypatch.setattr(cfg_settings.settings, "PAPER_TRADING", True)
     monkeypatch.setattr(handlers, "_get_paper_service", lambda: service)
 
-    assert handlers._sizing_profile().balance == pytest.approx(1100.0)
+    policy = handlers._resolve_trading_policy(DEFAULT_STRATEGY_PARAMETERS)
+
+    assert policy.risk_profile.balance == pytest.approx(1100.0)
 
 
 def test_sizing_profile_uses_configured_balance_when_paper_disabled(
@@ -187,9 +199,11 @@ def test_sizing_profile_uses_configured_balance_when_paper_disabled(
         lambda: (_ for _ in ()).throw(AssertionError("paper service used")),
     )
 
-    profile = handlers._sizing_profile()
+    policy = handlers._resolve_trading_policy(DEFAULT_STRATEGY_PARAMETERS)
 
-    assert profile.balance == pytest.approx(cfg_settings.settings.ACCOUNT_BALANCE)
+    assert policy.risk_profile.balance == pytest.approx(
+        cfg_settings.settings.ACCOUNT_BALANCE
+    )
 
 
 def test_sizing_profile_fails_closed_when_account_unreadable(monkeypatch) -> None:
@@ -200,7 +214,12 @@ def test_sizing_profile_fails_closed_when_account_unreadable(monkeypatch) -> Non
         lambda: (_ for _ in ()).throw(RuntimeError("state file corrupt")),
     )
 
-    assert handlers._sizing_profile().balance == 0.0
+    # No policy can be built from unusable equity: the trade is blocked
+    # instead of sizing from a fallback balance.
+    assert (
+        handlers._resolve_trading_policy(DEFAULT_STRATEGY_PARAMETERS)
+        is None
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +283,8 @@ def test_analyze_blocks_new_trade_when_equity_is_zero(
     text = _run_analyze(monkeypatch, tmp_path, service=service)
 
     assert "Paper Order: PLACED" not in text
-    assert "Account balance must be positive." in text
+    assert "paper account equity unavailable" in text
+    assert "no fallback balance was used" in text
     assert service.open_positions() == []
 
 
@@ -278,7 +298,8 @@ def test_analyze_blocks_new_trade_when_equity_cannot_be_read(
     text = _run_analyze(monkeypatch, tmp_path, service=service)
 
     assert "Paper Order: PLACED" not in text
-    assert "Account balance must be positive." in text
+    assert "paper account equity unavailable" in text
+    assert "no fallback balance was used" in text
     service.place_trade.assert_not_called()
 
 

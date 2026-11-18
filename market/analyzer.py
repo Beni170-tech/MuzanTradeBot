@@ -12,7 +12,11 @@ import math
 import urllib.request
 
 from backtest.replay import HistoricalBar
-from market.indicators import MIN_CANDLES, compute_analysis
+from market.indicators import compute_analysis
+from strategy.parameters import (
+    DEFAULT_STRATEGY_PARAMETERS,
+    StrategyParameters,
+)
 
 
 # CoinGecko uses coin IDs, not ticker symbols.
@@ -70,11 +74,15 @@ def get_current_price(symbol: str) -> float | None:
     return float(price)
 
 
-def analyze_coin(symbol: str) -> dict:
+def analyze_coin(symbol: str, *, parameters=None) -> dict:
     """Analyze a cryptocurrency and return analysis data.
 
     Args:
         symbol: The cryptocurrency symbol to analyze (e.g. "BTC").
+        parameters: Optional immutable strategy configuration. ``None``
+            uses the existing defaults exactly. The supplied object is
+            passed unchanged to :func:`market.indicators.compute_analysis`
+            and supplies the minimum-history requirement.
 
     Returns:
         A dict with analysis data: symbol, price, trend, signal, and
@@ -89,7 +97,15 @@ def analyze_coin(symbol: str) -> dict:
         Every failure path resolves to a placeholder (Unknown trend,
         WAIT signal, 0 confidence) so the bot never trades on stale,
         partial, or simulated information.
+
+    Raises:
+        TypeError: If ``parameters`` is not a StrategyParameters or None.
     """
+    if parameters is None:
+        parameters = DEFAULT_STRATEGY_PARAMETERS
+    elif not isinstance(parameters, StrategyParameters):
+        raise TypeError("parameters must be a StrategyParameters or None")
+
     symbol = symbol.upper()
 
     if symbol not in COINGECKO_IDS:
@@ -100,10 +116,10 @@ def analyze_coin(symbol: str) -> dict:
     except Exception:
         return _placeholder(symbol)
 
-    if len(closes) < MIN_CANDLES:
+    if len(closes) < parameters.min_candles:
         return _placeholder(symbol)
 
-    verdict = compute_analysis(closes, volumes)
+    verdict = compute_analysis(closes, volumes, parameters=parameters)
     if verdict["trend"] == "Unknown":
         return _placeholder(symbol)
 

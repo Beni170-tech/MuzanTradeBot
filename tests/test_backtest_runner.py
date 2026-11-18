@@ -278,6 +278,26 @@ def test_input_bars_are_not_modified(monkeypatch):
     assert bars == original
 
 
+def _unvalidated_profile(**overrides):
+    """Build a RiskProfile while bypassing its constructor validation.
+
+    RiskProfile rejects these values itself, so this reproduces a profile
+    that reached the backtest config without validation and proves
+    BacktestRunConfig still validates the risk budget it is handed.
+    """
+    profile = object.__new__(RiskProfile)
+    values = {
+        "balance": 1000.0,
+        "risk_percent": 2.0,
+        "stop_loss_percent": 2.0,
+        "take_profit_percent": 4.0,
+    }
+    values.update(overrides)
+    for name, value in values.items():
+        object.__setattr__(profile, name, value)
+    return profile
+
+
 @pytest.mark.parametrize(
     ("overrides", "error"),
     [
@@ -285,13 +305,36 @@ def test_input_bars_are_not_modified(monkeypatch):
         ({"symbol": None}, ValueError),
         ({"risk_profile": object()}, TypeError),
         ({"cost_model": object()}, TypeError),
-        ({"risk_profile": RiskProfile(balance=0.0)}, ValueError),
-        ({"risk_profile": RiskProfile(balance=-1.0)}, ValueError),
-        ({"risk_profile": RiskProfile(balance=float("nan"))}, ValueError),
-        ({"risk_profile": RiskProfile(balance=float("inf"))}, ValueError),
-        ({"risk_profile": RiskProfile(risk_percent=0.0)}, ValueError),
-        ({"risk_profile": RiskProfile(stop_loss_percent=-1.0)}, ValueError),
-        ({"risk_profile": RiskProfile(take_profit_percent=0.0)}, ValueError),
+        ({"risk_profile": _unvalidated_profile(balance=0.0)}, ValueError),
+        ({"risk_profile": _unvalidated_profile(balance=-1.0)}, ValueError),
+        (
+            {"risk_profile": _unvalidated_profile(
+                balance=float("nan")
+            )},
+            ValueError,
+        ),
+        (
+            {"risk_profile": _unvalidated_profile(
+                balance=float("inf")
+            )},
+            ValueError,
+        ),
+        (
+            {"risk_profile": _unvalidated_profile(risk_percent=0.0)},
+            ValueError,
+        ),
+        (
+            {"risk_profile": _unvalidated_profile(
+                stop_loss_percent=-1.0
+            )},
+            ValueError,
+        ),
+        (
+            {"risk_profile": _unvalidated_profile(
+                take_profit_percent=0.0
+            )},
+            ValueError,
+        ),
     ],
 )
 def test_invalid_config_is_rejected(overrides, error):

@@ -17,7 +17,11 @@ from config.settings import settings
 from market.analyzer import analyze_coin, get_current_price
 from brain.decision_engine import make_decision
 from risk.risk_manager import validate_trade
-from risk.risk_profile import RiskProfile
+from strategy.parameters import (
+    DEFAULT_STRATEGY_PARAMETERS,
+    StrategyParameters,
+)
+from strategy.trading_policy import TradingPolicy
 from trader.paper.service import PaperTradingService
 from trader.paper.storage import load_account as storage_load_account
 from trader.paper.storage import save_account as storage_save_account
@@ -175,20 +179,36 @@ def _paper_equity_for_sizing() -> float:
         return 0.0
 
 
-def _sizing_profile() -> RiskProfile:
-    """Build the risk profile that drives this trade's position size.
+def _resolve_trading_policy(
+    strategy: StrategyParameters,
+) -> TradingPolicy | None:
+    """Resolve the validated policy that drives this trade's sizing.
 
-    In paper mode, sizing uses the paper account's current equity. When
-    paper trading is disabled there is no paper account to read, so the
-    configured balance is used as before.
+    Called as late as practical: after analysis, the fresh quote, and the
+    market-mark freshness gate. In paper mode, sizing uses the paper
+    account's current equity. When that equity cannot be read, or is not
+    positive, no policy can be built and ``None`` is returned so the
+    caller blocks the trade instead of falling back to a configured
+    balance that no longer matches the account. When paper trading is
+    disabled there is no paper account to read, so the configured balance
+    is used as before.
+
+    Args:
+        strategy: The exact strategy instance that produced this
+            decision's signal. It is carried unchanged by the policy.
 
     Returns:
-        The RiskProfile for the current analysis request.
+        The TradingPolicy for this analysis request, or None when paper
+        equity is unusable.
     """
     if not settings.PAPER_TRADING:
-        return RiskProfile.from_settings(settings)
-    return RiskProfile.from_settings(
-        settings, balance=_paper_equity_for_sizing()
+        return TradingPolicy.from_settings(settings, strategy=strategy)
+
+    equity = _paper_equity_for_sizing()
+    if not math.isfinite(equity) or equity <= 0:
+        return None
+    return TradingPolicy.from_settings(
+        settings, balance=equity, strategy=strategy
     )
 
 
@@ -293,6 +313,18 @@ def _stale_mark_message(analysis: dict, block: MarksFreshnessResult) -> str:
         f"no older than {block.max_age_seconds:.0f}s.\n"
         f"   The trade was not placed and no fallback balance was used.\n"
         f"   Wait for the position monitor to refresh prices, then try again."
+    )
+
+
+def _sizing_unavailable_message(symbol: str) -> str:
+    """Build the reply when paper equity cannot drive position sizing."""
+    return (
+        f"📊 Analysis for {symbol}\n\n"
+        f"⛔ Trade Blocked: paper account equity unavailable\n"
+        "   Position sizing requires a positive account equity.\n"
+        "   The paper account state could not be read or reported no "
+        "usable capital.\n"
+        "   No trade was placed and no fallback balance was used."
     )
 
 
@@ -759,7 +791,11 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    result = analyze_coin(coin)
+    # One strategy instance drives analysis and the decision; the risk
+    # profile is resolved only after the quote and freshness gates below,
+    # so paper equity is fresh at the moment sizing happens.
+    strategy = DEFAULT_STRATEGY_PARAMETERS
+    result = analyze_coin(coin, parameters=strategy)
 
     # Historical candles drive trend/signal/confidence, but the trade must
     # be priced from a fresh market quote. The chart's last close is a
@@ -774,7 +810,7 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     result = {**result, "price": quote}
-    decision = make_decision(result)
+    decision = make_decision(result, parameters=strategy)
 
     # Refuse to size a new trade from stale or missing market marks. This
     # runs before sizing so no fallback balance can be used.
@@ -790,9 +826,21 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    profile = _sizing_profile()
-    verdict = validate_trade(decision, result, profile)
-    trade = build_trade(result, verdict, profile)
+    # Paper equity is read here, immediately before sizing, from the same
+    # account whose marks were just verified. The strategy instance that
+    # produced the signal is carried unchanged, and no fallback balance is
+    # substituted when equity is unavailable.
+    policy = _resolve_trading_policy(strategy)
+    if policy is None:
+        logger.warning(
+            "Paper account equity is unavailable for %s; trade blocked.",
+            result.get("symbol", coin),
+        )
+        await update.message.reply_text(_sizing_unavailable_message(coin))
+        return
+
+    verdict = validate_trade(decision, result, policy.risk_profile)
+    trade = build_trade(result, verdict, policy.risk_profile)
     log_trade(
         trade.symbol,
         trade.decision,

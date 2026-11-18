@@ -72,14 +72,35 @@ def test_unknown_trend_is_blocked(trend):
     assert any("condition" in reason.lower() for reason in verdict.reasons)
 
 
+def _unvalidated_profile(**overrides):
+    """Build a RiskProfile while bypassing its constructor validation.
+
+    RiskProfile now rejects these values, so this reproduces a profile
+    that reached the risk layer without passing through validation (a
+    restored object or a future caller) and proves the risk manager still
+    fails closed on its own.
+    """
+    profile = object.__new__(RiskProfile)
+    values = {
+        "balance": 1000.0,
+        "risk_percent": 2.0,
+        "stop_loss_percent": 2.0,
+        "take_profit_percent": 4.0,
+    }
+    values.update(overrides)
+    for name, value in values.items():
+        object.__setattr__(profile, name, value)
+    return profile
+
+
 @pytest.mark.parametrize(
     "profile",
     [
-        RiskProfile(balance=0),
-        RiskProfile(risk_percent=0),
-        RiskProfile(stop_loss_percent=0),
-        RiskProfile(take_profit_percent=0),
-        RiskProfile(balance=-500),
+        _unvalidated_profile(balance=0),
+        _unvalidated_profile(risk_percent=0),
+        _unvalidated_profile(stop_loss_percent=0),
+        _unvalidated_profile(take_profit_percent=0),
+        _unvalidated_profile(balance=-500),
     ],
 )
 def test_bad_risk_profile_is_blocked(profile):
