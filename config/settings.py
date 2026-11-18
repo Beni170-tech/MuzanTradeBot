@@ -38,6 +38,14 @@ class Settings:
     # Telegram
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
 
+    # Telegram access control (Milestone M-A)
+    # Comma-separated Telegram user ids and/or chat ids allowed to use
+    # the bot. Empty (the default) authorizes nobody: the bot answers
+    # unauthorized updates with a denial notice instead of account data.
+    TELEGRAM_ALLOWED_CHAT_IDS: str = os.getenv(
+        "TELEGRAM_ALLOWED_CHAT_IDS", ""
+    )
+
     # Binance
     BINANCE_API_KEY: str = os.getenv("BINANCE_API_KEY", "")
     BINANCE_API_SECRET: str = os.getenv("BINANCE_API_SECRET", "")

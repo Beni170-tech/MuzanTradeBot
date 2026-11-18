@@ -7,6 +7,10 @@ import logging
 from telegram.ext import Application, CommandHandler
 
 from config.settings import settings
+from telegram_bot.auth import (
+    authorization_status,
+    install_authorization_gate,
+)
 from telegram_bot.handlers import (
     start,
     help_command,
@@ -30,6 +34,14 @@ _paper_monitor: PaperPositionMonitor | None = None
 def build_application() -> Application:
     """Build and configure the Telegram Application."""
     app = Application.builder().token(settings.TELEGRAM_BOT_TOKEN).build()
+
+    # Access control first: no command or callback runs for an update
+    # that is not on the allowlist. With no configured ids the bot stays
+    # locked, which is the safe default.
+    install_authorization_gate(app)
+    logger.info(
+        "Telegram authorization: %s.", authorization_status()
+    )
 
     # Register command handlers
     app.add_handler(CommandHandler("start", start))
