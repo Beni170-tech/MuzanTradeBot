@@ -1024,16 +1024,23 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     # Sprint 9A: push an order-placed alert (never raises).
                     await _dispatch_alert("order_placed", paper_order)
             except Exception as exc:
-                # Paper trading failure should not break the main analysis
-                # flow, but it must never fail silently: log it so a bug in
-                # the paper-trading branch (e.g. an unexpected mock or a
-                # manager error) is visible instead of looking like the
-                # paper-trading path was never reached.
-                logger.warning(
+                # A paper-trading failure must not break the analysis reply,
+                # but it must never look like a successful placement either.
+                # Log the full traceback for diagnosis, and tell the user
+                # plainly that no order was confirmed. Exception details are
+                # not echoed to Telegram: they can contain account internals.
+                logger.exception(
                     "Paper trading integration failed during /analyze "
                     "for %s: %s",
                     trade.symbol,
                     exc,
+                )
+                message += (
+                    "\n\n❌ Paper Execution Failed\n"
+                    "   The paper trading step did not complete.\n"
+                    "   No confirmed order is reported as placed.\n"
+                    "   Check /positions before retrying; "
+                    "see the bot logs for details."
                 )
 
     else:
