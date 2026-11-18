@@ -40,11 +40,25 @@ from trader.paper.analytics import (
     get_recent_trades,
     group_by_symbol,
 )
+# The risk/concentration managers and analytics helpers below stay
+# imported at handler scope on purpose: the gate decisions now live in
+# trader.paper.entry_gates, and these names remain part of this
+# module's patchable surface for integrations and tests.
 from trader.paper.correlation_risk import (
     CorrelationRiskManager,
     trade_exposure,
 )
 from trader.paper.daily_risk import DailyRiskManager
+from trader.paper.entry_gates import (
+    RULE_DAILY_LOSS,
+    RULE_MAX_OPEN_POSITIONS,
+    RULE_PORTFOLIO_EXPOSURE,
+    RULE_PORTFOLIO_RISK,
+    RULE_SYMBOL_EXPOSURE,
+    RULE_SYMBOL_POSITIONS,
+    collect_entry_gate_metrics,
+    evaluate_entry_gates,
+)
 from trader.paper.mark_freshness import (
     MarksFreshnessResult,
     check_marks_freshness,
@@ -54,6 +68,7 @@ from trader.paper.max_open_positions import MaxOpenPositionsManager
 from trader.paper.portfolio_risk import (
     PortfolioRiskManager,
     total_portfolio_risk,
+    trade_risk,
 )
 from trader.trade import build_trade
 from journal.journal import log_trade
@@ -775,6 +790,141 @@ async def version(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(f"MuzanTradeBot v{__version__}")
 
 
+def _entry_gate_rejection_message(trade, outcome) -> str:
+    """Render the /analyze rejection text for one entry gate outcome.
+
+    The text is byte-for-byte the text the inline gate checks appended
+    before the extraction, produced from the frozen snapshot the gate
+    returned instead of re-reading account state. ``outcome.rule``
+    selects the block, so message precedence follows the evaluator's
+    gate order.
+    """
+    metrics = outcome.metrics
+
+    if outcome.rule == RULE_PORTFOLIO_RISK:
+        return (
+            f"\n⚠️ Portfolio Risk Limit Exceeded\n"
+            f"   Current Risk: ${metrics.current_risk:,.2f}\n"
+            f"   Risk Limit: ${metrics.risk_limit:,.2f}\n"
+            f"   Trade Risk: "
+            f"${trade_risk_value(trade):,.2f}\n"
+            f"   The trade was not placed.\n"
+            f"   Close existing positions to free up risk budget."
+        )
+
+    if outcome.rule == RULE_PORTFOLIO_EXPOSURE:
+        return (
+            f"\n⚠️ Portfolio Exposure Limit Exceeded\n"
+            f"   Current Exposure: ${metrics.current_exposure:,.2f}\n"
+            f"   Requested Exposure: "
+            f"${trade.price * trade.position_size:,.2f}\n"
+            f"   Exposure Limit: ${metrics.exposure_limit:,.2f}\n"
+            f"   The trade was not placed.\n"
+            f"   Close existing positions to free up exposure budget."
+        )
+
+    if outcome.rule == RULE_DAILY_LOSS:
+        return (
+            f"\n⛔ Daily Loss Limit Reached\n"
+            f"   Day: {metrics.day}\n"
+            f"   Today's Realized PnL: "
+            f"{_format_pnl_value(metrics.realized_pnl_today)}\n"
+            f"   Daily Loss Limit: ${metrics.loss_limit:,.2f}\n"
+            f"   The trade was not placed.\n"
+            f"   New paper trades resume on the next day."
+        )
+
+    if outcome.rule == RULE_MAX_OPEN_POSITIONS:
+        return (
+            f"\n⛔ Maximum Open Positions Reached\n"
+            f"   Current Open Positions: "
+            f"{metrics.current_open_positions}\n"
+            f"   Max Open Positions: "
+            f"{metrics.limit}\n"
+            f"   The trade was not placed.\n"
+            f"   Close existing positions to free up "
+            f"open-position capacity."
+        )
+
+    if outcome.rule in (RULE_SYMBOL_POSITIONS, RULE_SYMBOL_EXPOSURE):
+        block = (
+            f"\n⚠️ Symbol Concentration Limit Exceeded\n"
+            f"   Symbol: {trade.symbol}\n"
+        )
+        if outcome.rule == RULE_SYMBOL_POSITIONS:
+            block += (
+                f"   Open Positions: "
+                f"{metrics.open_positions}\n"
+                f"   Max Positions: "
+                f"{metrics.max_positions}\n"
+            )
+        else:
+            block += (
+                f"   Current Exposure: "
+                f"${metrics.symbol_exposure:,.2f}\n"
+                f"   Requested Exposure: "
+                f"${trade_exposure(trade):,.2f}\n"
+                f"   Exposure Limit: "
+                f"${metrics.exposure_limit:,.2f}\n"
+            )
+        block += (
+            f"   The trade was not placed.\n"
+            f"   Close existing positions to free up "
+            f"concentration budget."
+        )
+        return block
+
+    raise ValueError(
+        f"unsupported entry gate rejection rule: {outcome.rule!r}"
+    )
+
+
+async def _dispatch_entry_gate_alerts(trade, outcome) -> None:
+    """Dispatch the rejection alerts for one entry gate outcome.
+
+    Alert count, ordering and payloads match the pre-extraction
+    sequence: the daily-loss breaker alert precedes its rejection
+    alert, and the max-open-positions alert precedes its rejection
+    alert. Every dispatch is fail-safe and never raises.
+    """
+    if outcome.rule == RULE_DAILY_LOSS:
+        await _dispatch_alert("daily_loss_breaker", outcome.metrics)
+        await _dispatch_alert(
+            "trade_rejected",
+            trade,
+            "daily loss breaker active for today",
+        )
+        return
+
+    if outcome.rule == RULE_MAX_OPEN_POSITIONS:
+        await _dispatch_alert(
+            "max_open_positions_reached", outcome.metrics
+        )
+        await _dispatch_alert(
+            "trade_rejected",
+            trade,
+            "maximum open positions limit reached",
+        )
+        return
+
+    if outcome.rule == RULE_PORTFOLIO_RISK:
+        await _dispatch_alert(
+            "trade_rejected", trade, "portfolio risk limit exceeded"
+        )
+        return
+
+    if outcome.rule == RULE_PORTFOLIO_EXPOSURE:
+        await _dispatch_alert(
+            "trade_rejected", trade, "portfolio exposure limit exceeded"
+        )
+        return
+
+    if outcome.rule in (RULE_SYMBOL_POSITIONS, RULE_SYMBOL_EXPOSURE):
+        await _dispatch_alert(
+            "trade_rejected", trade, "symbol concentration limit exceeded"
+        )
+
+
 async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Analyze a cryptocurrency through the full Guardian Mode pipeline."""
     if not check_rate_limit(update.effective_chat.id, _rate_limit_config):
@@ -917,195 +1067,40 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         "trailing_stop_updated", trade.symbol, old_stop, new_stop
                     )
 
-                # Portfolio risk check (Sprint 7A): run after SL/TP
-                # closure and trailing stop update, but before placing
-                # any new order. When PORTFOLIO_RISK_LIMIT > 0, reject
-                # trades that would exceed the configured limit.
-                if settings.PORTFOLIO_RISK_LIMIT > 0:
-                    manager = PortfolioRiskManager(
-                        service.execution_backend(), settings.PORTFOLIO_RISK_LIMIT
+                # Portfolio safety gates (Sprints 7A-8B): run after the
+                # SL/TP closure check and the trailing stop update, but
+                # before placing any new order. One domain evaluator owns
+                # the gate order and thresholds; it stops at the first
+                # rejection, so the reported rule is always the
+                # highest-precedence failing gate. A limit that is not
+                # configured (<= 0) skips its gate entirely.
+                gate_outcome = evaluate_entry_gates(
+                    service.execution_backend(),
+                    trade,
+                    portfolio_risk_limit=settings.PORTFOLIO_RISK_LIMIT,
+                    portfolio_exposure_limit=(
+                        settings.PORTFOLIO_EXPOSURE_LIMIT
+                    ),
+                    daily_loss_limit=settings.PORTFOLIO_DAILY_LOSS_LIMIT,
+                    max_open_positions=(
+                        settings.PORTFOLIO_MAX_OPEN_POSITIONS
+                    ),
+                    max_positions_per_symbol=(
+                        settings.PORTFOLIO_MAX_POSITIONS_PER_SYMBOL
+                    ),
+                    max_exposure_per_symbol=(
+                        settings.PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL
+                    ),
+                )
+                if not gate_outcome.allowed:
+                    message += _entry_gate_rejection_message(
+                        trade, gate_outcome
                     )
-                    if not manager.can_open_trade(trade):
-                        current_risk = total_portfolio_risk(
-                            service.execution_backend()
-                        )
-                        message += (
-                            f"\n⚠️ Portfolio Risk Limit Exceeded\n"
-                            f"   Current Risk: ${current_risk:,.2f}\n"
-                            f"   Risk Limit: ${settings.PORTFOLIO_RISK_LIMIT:,.2f}\n"
-                            f"   Trade Risk: "
-                            f"${trade_risk_value(trade):,.2f}\n"
-                            f"   The trade was not placed.\n"
-                            f"   Close existing positions to free up risk budget."
-                        )
-                        # Sprint 9A: push a guardian/risk-limit rejection alert.
-                        await _dispatch_alert(
-                            "trade_rejected",
-                            trade,
-                            "portfolio risk limit exceeded",
-                        )
-                        await update.message.reply_text(message)
-                        return
-
-                # Portfolio exposure check (Sprint 7B): run after the
-                # portfolio risk check and before placing any new order.
-                # When PORTFOLIO_EXPOSURE_LIMIT > 0, reject trades that
-                # would exceed the configured notional exposure limit.
-                if settings.PORTFOLIO_EXPOSURE_LIMIT > 0:
-                    prospective = trade.price * trade.position_size
-                    current_exposure = exposure_metrics(
-                        service.execution_backend(), 0.0
-                    ).current_exposure
-                    if current_exposure + prospective > settings.PORTFOLIO_EXPOSURE_LIMIT:
-                        metrics = exposure_metrics(
-                            service.execution_backend(), settings.PORTFOLIO_EXPOSURE_LIMIT
-                        )
-                        message += (
-                            f"\n⚠️ Portfolio Exposure Limit Exceeded\n"
-                            f"   Current Exposure: ${current_exposure:,.2f}\n"
-                            f"   Requested Exposure: ${prospective:,.2f}\n"
-                            f"   Exposure Limit: ${settings.PORTFOLIO_EXPOSURE_LIMIT:,.2f}\n"
-                            f"   The trade was not placed.\n"
-                            f"   Close existing positions to free up exposure budget."
-                        )
-                        # Sprint 9A: push a guardian/risk-limit rejection alert.
-                        await _dispatch_alert(
-                            "trade_rejected",
-                            trade,
-                            "portfolio exposure limit exceeded",
-                        )
-                        await update.message.reply_text(message)
-                        return
-
-                # Daily loss circuit breaker (Sprint 8A): run after the
-                # portfolio exposure check and before the symbol
-                # concentration check, so portfolio-wide rules are
-                # evaluated before the narrower per-symbol rule. When
-                # PORTFOLIO_DAILY_LOSS_LIMIT > 0, reject any new trade
-                # once the calendar day's net realized PnL reaches
-                # -limit (reaching the limit stops trading for the day).
-                if settings.PORTFOLIO_DAILY_LOSS_LIMIT > 0:
-                    daily_risk_manager = DailyRiskManager(
-                        service.execution_backend(),
-                        settings.PORTFOLIO_DAILY_LOSS_LIMIT,
-                    )
-                    if not daily_risk_manager.evaluate().allowed:
-                        daily_metrics = daily_risk_manager.metrics()
-                        message += (
-                            f"\n⛔ Daily Loss Limit Reached\n"
-                            f"   Day: {daily_metrics.day}\n"
-                            f"   Today's Realized PnL: "
-                            f"{_format_pnl_value(daily_metrics.realized_pnl_today)}\n"
-                            f"   Daily Loss Limit: "
-                            f"${daily_metrics.loss_limit:,.2f}\n"
-                            f"   The trade was not placed.\n"
-                            f"   New paper trades resume on the next day."
-                        )
-                        # Sprint 9A: push the daily-loss breaker activation
-                        # alert plus the guardian rejection alert (both
-                        # never raise).
-                        await _dispatch_alert(
-                            "daily_loss_breaker", daily_metrics
-                        )
-                        await _dispatch_alert(
-                            "trade_rejected",
-                            trade,
-                            "daily loss breaker active for today",
-                        )
-                        await update.message.reply_text(message)
-                        return
-
-                # Maximum open portfolio positions (Sprint 8B): run after
-                # the daily loss circuit breaker and before the symbol
-                # concentration check, so portfolio-wide guards are
-                # evaluated before the narrower per-symbol rule. When
-                # PORTFOLIO_MAX_OPEN_POSITIONS > 0, reject new paper
-                # trades once the current open position count reaches the
-                # configured limit.
-                if settings.PORTFOLIO_MAX_OPEN_POSITIONS > 0:
-                    mgr = MaxOpenPositionsManager(
-                        service.execution_backend(),
-                        settings.PORTFOLIO_MAX_OPEN_POSITIONS,
-                    )
-                    mop_result = mgr.evaluate()
-                    if not mop_result.allowed:
-                        message += (
-                            f"\n⛔ Maximum Open Positions Reached\n"
-                            f"   Current Open Positions: "
-                            f"{mop_result.current_open_positions}\n"
-                            f"   Max Open Positions: "
-                            f"{mop_result.limit}\n"
-                            f"   The trade was not placed.\n"
-                            f"   Close existing positions to free up "
-                            f"open-position capacity."
-                        )
-                        # Sprint 9A: push the max-open-positions alert plus
-                        # the guardian rejection alert (both never raise).
-                        await _dispatch_alert(
-                            "max_open_positions_reached", mop_result
-                        )
-                        await _dispatch_alert(
-                            "trade_rejected",
-                            trade,
-                            "maximum open positions limit reached",
-                        )
-                        await update.message.reply_text(message)
-                        return
-
-                # Correlation / concentration check (Sprint 7C): run after
-                # the portfolio exposure check and before placing any new
-                # order. When either per-symbol limit is configured, reject
-                # trades that would exceed the position-count cap or the
-                # per-symbol notional exposure cap. Symbol concentration is
-                # the narrowest portfolio constraint, so it is evaluated
-                # last and reports the most specific failing rule.
-                if (
-                    settings.PORTFOLIO_MAX_POSITIONS_PER_SYMBOL > 0
-                    or settings.PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL > 0
-                ):
-                    concentration_manager = CorrelationRiskManager(
-                        service.execution_backend(),
-                        settings.PORTFOLIO_MAX_POSITIONS_PER_SYMBOL,
-                        settings.PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL,
-                    )
-                    conc_check = concentration_manager.evaluate(trade)
-                    if not conc_check.allowed:
-                        conc_metrics = concentration_manager.metrics(
-                            trade.symbol
-                        )
-                        message += (
-                            f"\n⚠️ Symbol Concentration Limit Exceeded\n"
-                            f"   Symbol: {trade.symbol}\n"
-                        )
-                        if conc_check.rule == "positions":
-                            message += (
-                                f"   Open Positions: "
-                                f"{conc_metrics.open_positions}\n"
-                                f"   Max Positions: "
-                                f"{conc_metrics.max_positions}\n"
-                            )
-                        else:
-                            message += (
-                                f"   Current Exposure: "
-                                f"${conc_metrics.symbol_exposure:,.2f}\n"
-                                f"   Requested Exposure: "
-                                f"${trade_exposure(trade):,.2f}\n"
-                                f"   Exposure Limit: "
-                                f"${conc_metrics.exposure_limit:,.2f}\n"
-                            )
-                        message += (
-                            f"   The trade was not placed.\n"
-                            f"   Close existing positions to free up "
-                            f"concentration budget."
-                        )
-                        # Sprint 9A: push a guardian/risk-limit rejection alert.
-                        await _dispatch_alert(
-                            "trade_rejected",
-                            trade,
-                            "symbol concentration limit exceeded",
-                        )
-                        await update.message.reply_text(message)
-                        return
+                    # Sprint 9A: push the gate's rejection alerts, in the
+                    # same order and count as the inline checks used.
+                    await _dispatch_entry_gate_alerts(trade, gate_outcome)
+                    await update.message.reply_text(message)
+                    return
 
                 # Now place the new trade (if still approved)
                 paper_order = service.place_trade(trade)
@@ -1507,17 +1502,14 @@ def _position_mark_display(pos) -> str:
 
 
 def trade_risk_value(trade) -> float:
-    """Compute the dollar risk of a trade (for display in risk limit messages).
+    """Compute the dollar risk of a trade (for display in gate messages).
 
-    Mirrors the logic in trader.paper.portfolio_risk.trade_risk without
-    importing it here to avoid a circular dependency.
+    Thin alias for :func:`trader.paper.portfolio_risk.trade_risk`, the
+    single source of truth for a candidate trade's risk contribution.
+    Keeping the name preserves the handler-level API used by callers
+    and tests while removing the duplicated formula.
     """
-    if trade.position_size <= 0 or not trade.stop_loss or trade.stop_loss <= 0:
-        return 0.0
-    if trade.side == "LONG":
-        return max(0.0, (trade.price - trade.stop_loss) * trade.position_size)
-    else:
-        return max(0.0, (trade.stop_loss - trade.price) * trade.position_size)
+    return trade_risk(trade)
 
 
 async def stats_command(
@@ -1592,10 +1584,27 @@ async def stats_command(
         f"Max Consec. Losses: {risk.max_consecutive_losses}\n"
     )
 
-    # --- Section 3b: Portfolio Risk (Sprint 7A) ---
-    if settings.PORTFOLIO_RISK_LIMIT > 0:
-        manager = PortfolioRiskManager(service.execution_backend(), settings.PORTFOLIO_RISK_LIMIT)
-        prm = manager.metrics()
+    # --- Sections 3b-3f: Entry gate metrics (Sprints 7A-8B) ---
+    # One collector call reports every enabled gate without
+    # short-circuiting; a gate whose limit is not configured (<= 0)
+    # comes back as None and its section is omitted, exactly as when
+    # each section read its own manager.
+    gate_metrics = collect_entry_gate_metrics(
+        service.execution_backend(),
+        portfolio_risk_limit=settings.PORTFOLIO_RISK_LIMIT,
+        portfolio_exposure_limit=settings.PORTFOLIO_EXPOSURE_LIMIT,
+        daily_loss_limit=settings.PORTFOLIO_DAILY_LOSS_LIMIT,
+        max_open_positions=settings.PORTFOLIO_MAX_OPEN_POSITIONS,
+        max_positions_per_symbol=(
+            settings.PORTFOLIO_MAX_POSITIONS_PER_SYMBOL
+        ),
+        max_exposure_per_symbol=(
+            settings.PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL
+        ),
+    )
+
+    if gate_metrics.portfolio_risk is not None:
+        prm = gate_metrics.portfolio_risk
         message += (
             f"\n\n━━━━━━━━━━━━━━━━━━━\n"
             f"📊 Portfolio Risk\n"
@@ -1606,9 +1615,8 @@ async def stats_command(
             f"Remaining: ${prm.remaining:,.2f}\n"
         )
 
-    # --- Section 3c: Portfolio Exposure (Sprint 7B) ---
-    if settings.PORTFOLIO_EXPOSURE_LIMIT > 0:
-        em = exposure_metrics(service.execution_backend(), settings.PORTFOLIO_EXPOSURE_LIMIT)
+    if gate_metrics.portfolio_exposure is not None:
+        em = gate_metrics.portfolio_exposure
         message += (
             f"\n\n━━━━━━━━━━━━━━━━━━━\n"
             f"📊 Portfolio Exposure\n"
@@ -1619,17 +1627,8 @@ async def stats_command(
             f"Remaining: ${em.remaining:,.2f}\n"
         )
 
-    # --- Section 3d: Symbol Concentration (Sprint 7C) ---
-    if (
-        settings.PORTFOLIO_MAX_POSITIONS_PER_SYMBOL > 0
-        or settings.PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL > 0
-    ):
-        concentration_manager = CorrelationRiskManager(
-            service.execution_backend(),
-            settings.PORTFOLIO_MAX_POSITIONS_PER_SYMBOL,
-            settings.PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL,
-        )
-        concentration_report = concentration_manager.concentration_report()
+    if gate_metrics.symbol_concentration is not None:
+        concentration_report = gate_metrics.symbol_concentration
         message += (
             f"\n\n━━━━━━━━━━━━━━━━━━━\n"
             f"🧲 Symbol Concentration\n"
@@ -1651,13 +1650,8 @@ async def stats_command(
                     f"({cm.exposure_usage_percent:.1f}%)\n"
                 )
 
-    # --- Section 3e: Daily Risk (Sprint 8A) ---
-    if settings.PORTFOLIO_DAILY_LOSS_LIMIT > 0:
-        daily_risk_manager = DailyRiskManager(
-            service.execution_backend(),
-            settings.PORTFOLIO_DAILY_LOSS_LIMIT,
-        )
-        daily_metrics = daily_risk_manager.metrics()
+    if gate_metrics.daily_loss is not None:
+        daily_metrics = gate_metrics.daily_loss
         if daily_metrics.breached:
             daily_status = "⛔ Brake active — new trades halted until tomorrow."
         else:
@@ -1675,13 +1669,8 @@ async def stats_command(
             f"Status: {daily_status}\n"
         )
 
-    # --- Section 3f: Maximum Open Positions (Sprint 8B) ---
-    if settings.PORTFOLIO_MAX_OPEN_POSITIONS > 0:
-        mgr = MaxOpenPositionsManager(
-            service.execution_backend(),
-            settings.PORTFOLIO_MAX_OPEN_POSITIONS,
-        )
-        mop_metrics = mgr.metrics()
+    if gate_metrics.max_open_positions is not None:
+        mop_metrics = gate_metrics.max_open_positions
         message += (
             f"\n\n━━━━━━━━━━━━━━━━━━━\n"
             f"📊 Max Open Positions\n"

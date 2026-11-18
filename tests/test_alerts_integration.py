@@ -600,3 +600,52 @@ def test_get_alert_manager_is_cached():
     first = _handlers._get_alert_manager()
     second = _handlers._get_alert_manager()
     assert first is second
+
+
+# ---------------------------------------------------------------------------
+# 5b. Rejection alert ordering (daily loss and max-open gates)
+# ---------------------------------------------------------------------------
+
+
+def _alert_names(alerts):
+    return [entry[0].split(".")[-1] for entry in alerts.mock_calls]
+
+
+def test_daily_loss_breaker_alert_precedes_rejection_alert(monkeypatch):
+    today = datetime.now().strftime("%Y-%m-%d")
+    closed_today = MagicMock()
+    closed_today.realized_pnl = -150.0
+    closed_today.exit_at = f"{today} 10:00:00"
+    service = _make_service(closed_positions=[closed_today])
+    alerts = _make_alerts()
+
+    _run_analyze(
+        monkeypatch,
+        alerts=alerts,
+        service=service,
+        settings_overrides={"PORTFOLIO_DAILY_LOSS_LIMIT": 100.0},
+    )
+
+    names = _alert_names(alerts)
+    assert names.index("daily_loss_breaker") < names.index("trade_rejected")
+    assert names.count("trade_rejected") == 1
+
+
+def test_max_open_positions_alert_precedes_rejection_alert(monkeypatch):
+    service = _make_service(
+        open_positions=[{"symbol": "BTC"}, {"symbol": "ETH"}]
+    )
+    alerts = _make_alerts()
+
+    _run_analyze(
+        monkeypatch,
+        alerts=alerts,
+        service=service,
+        settings_overrides={"PORTFOLIO_MAX_OPEN_POSITIONS": 2},
+    )
+
+    names = _alert_names(alerts)
+    assert names.index("max_open_positions_reached") < names.index(
+        "trade_rejected"
+    )
+    assert names.count("trade_rejected") == 1
