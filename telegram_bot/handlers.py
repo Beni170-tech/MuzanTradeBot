@@ -27,6 +27,19 @@ from trader.paper.storage import save_account as storage_save_account
 from trader.paper.order import PaperOrder, PaperOrderStatus
 from trader.paper.order import paper_exit_status, paper_exit_date
 from trader.paper.rules import is_valid_exit_price
+from trader.paper.read_model import (
+    CloseRequestError,
+    CloseTargetStatus,
+    account_view,
+    execute_close,
+    history_view,
+    open_positions_view,
+    parse_close_request,
+    positions_with_marks,
+    recorded_mark,
+    select_close_target,
+    stats_view,
+)
 from trader.paper.analytics import (
     OverallPerformance,
     RiskMetrics,
@@ -753,10 +766,10 @@ async def paper_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         )
         return
 
-    service = _get_paper_service()
-    summary = service.summary()
-    open_positions = service.open_positions()
-    closed_positions = service.closed_positions()
+    view = account_view(_get_paper_service())
+    summary = view.summary
+    open_positions = view.open_positions
+    closed_positions = view.recent_closed
 
     message = (
         f"📄 Paper Account Summary\n\n"
@@ -800,8 +813,7 @@ async def positions_command(
         )
         return
 
-    service = _get_paper_service()
-    open_positions = service.open_positions()
+    open_positions = open_positions_view(_get_paper_service())
 
     if not open_positions:
         await update.message.reply_text("📭 No open paper positions.")
@@ -829,15 +841,15 @@ async def history_command(
         )
         return
 
-    service = _get_paper_service()
-    closed_positions = service.closed_positions()
+    view = history_view(_get_paper_service())
+    closed_positions = view.recent_closed
 
     if not closed_positions:
         await update.message.reply_text("📭 No closed paper trades yet.")
         return
 
     message = "📜 Closed Paper Trades (most recent first):\n\n"
-    for pos in closed_positions[:10]:
+    for pos in closed_positions:
         label = _format_pnl_label(pos)
         message += (
             f"{pos.symbol} {pos.side.value}\n"
@@ -884,7 +896,14 @@ async def close_command(
         )
         return
 
-    if len(context.args) < 2:
+    # Everything up to the service lookup stays pure argument work, so a
+    # rejected price never loads the account, touches positions, balances,
+    # storage or alerts. The lower-level close path enforces the same rule,
+    # so a direct caller cannot bypass it either.
+    parsed = parse_close_request(
+        context.args, is_valid_price=is_valid_exit_price
+    )
+    if parsed.error is CloseRequestError.USAGE:
         await update.message.reply_text(
             "❌ Usage: /close <SYMBOL> <EXIT_PRICE> [ORDER_ID]\n\n"
             "Examples:\n"
@@ -893,93 +912,77 @@ async def close_command(
             "positions share a symbol)"
         )
         return
-
-    symbol = context.args[0].strip().upper()
-    try:
-        exit_price = float(context.args[1])
-    except ValueError:
+    if parsed.error is CloseRequestError.NOT_A_NUMBER:
         await update.message.reply_text(
-            f"❌ Invalid exit price: '{context.args[1]}'. "
+            f"❌ Invalid exit price: '{parsed.raw_price}'. "
             "Please provide a valid number."
         )
         return
-
-    # Reject unusable prices before touching positions, balances, storage
-    # or alerts. The lower-level close path enforces the same rule, so a
-    # direct caller cannot bypass it either.
-    if not is_valid_exit_price(exit_price):
+    if parsed.error is CloseRequestError.INVALID_PRICE:
         await update.message.reply_text(
-            f"❌ Invalid exit price: '{context.args[1]}'. "
+            f"❌ Invalid exit price: '{parsed.raw_price}'. "
             "Exit price must be a finite number greater than 0."
         )
         return
 
-    order_id = (
-        context.args[2].strip() if len(context.args) > 2 else None
-    )
+    request = parsed.request
+    symbol = request.symbol
+    exit_price = request.exit_price
 
     service = _get_paper_service()
-    symbol_positions = [
-        position
-        for position in service.open_positions()
-        if str(position.symbol).strip().upper() == symbol
-    ]
+    selection = select_close_target(service, request)
 
-    if not symbol_positions:
+    if selection.status is CloseTargetStatus.NO_POSITION:
         await update.message.reply_text(
             f"❌ No open paper position found for {symbol}."
         )
         return
 
-    if order_id is None:
-        if len(symbol_positions) > 1:
-            choices = "\n".join(
-                _position_choice_line(position)
-                for position in symbol_positions
-            )
-            await update.message.reply_text(
-                f"⚠️ Multiple open positions for {symbol} — "
-                "nothing was closed.\n\n"
-                f"{choices}\n\n"
-                "Re-run with the exact position ID:\n"
-                f"/close {symbol} {exit_price:g} <ORDER_ID>"
-            )
-            return
-        target = symbol_positions[0]
-    else:
-        matches = [
-            position
-            for position in symbol_positions
-            if str(position.order_id).strip().upper() == order_id.upper()
-        ]
-        if not matches:
-            choices = "\n".join(
-                _position_choice_line(position)
-                for position in symbol_positions
-            )
-            await update.message.reply_text(
-                f"❌ No open {symbol} position with ID "
-                f"'{order_id}' — nothing was closed.\n\n"
-                f"Available {symbol} position IDs:\n{choices}\n\n"
-                "Re-run with the exact position ID:\n"
-                f"/close {symbol} {exit_price:g} <ORDER_ID>"
-            )
-            return
-        target = matches[0]
+    if selection.status is CloseTargetStatus.AMBIGUOUS:
+        choices = "\n".join(
+            _position_choice_line(position)
+            for position in selection.symbol_positions
+        )
+        await update.message.reply_text(
+            f"⚠️ Multiple open positions for {symbol} — "
+            "nothing was closed.\n\n"
+            f"{choices}\n\n"
+            "Re-run with the exact position ID:\n"
+            f"/close {symbol} {exit_price:g} <ORDER_ID>"
+        )
+        return
 
-    order = service.close_position_by_id(
-        target.order_id, exit_price, PaperOrderStatus.CLOSED_MANUAL
+    if selection.status is CloseTargetStatus.ID_NOT_FOUND:
+        choices = "\n".join(
+            _position_choice_line(position)
+            for position in selection.symbol_positions
+        )
+        await update.message.reply_text(
+            f"❌ No open {symbol} position with ID "
+            f"'{request.order_id}' — nothing was closed.\n\n"
+            f"Available {symbol} position IDs:\n{choices}\n\n"
+            "Re-run with the exact position ID:\n"
+            f"/close {symbol} {exit_price:g} <ORDER_ID>"
+        )
+        return
+
+    target = selection.target
+    result = execute_close(
+        service,
+        target,
+        exit_price,
+        PAPER_STATE_PATH,
     )
 
-    if order is None:
+    if result is None:
         await update.message.reply_text(
             f"❌ Could not close {symbol} position "
             f"'{target.order_id}' — nothing was closed."
         )
         return
 
-    service.save_account(PAPER_STATE_PATH)
-    new_balance = service.summary().current_balance
+    order = result.order
+    new_balance = result.new_balance
 
     await update.message.reply_text(
         f"✅ Position Closed\n\n"
@@ -1024,17 +1027,12 @@ def _recorded_mark(pos) -> float | None:
     else (missing, None, or an unexpected value) is treated as "no mark
     recorded yet" so displays can never invent a valuation.
     """
-    mark = getattr(pos, "mark_price", None)
-    if isinstance(mark, bool) or not isinstance(mark, (int, float)):
-        return None
-    if not math.isfinite(mark) or mark <= 0:
-        return None
-    return float(mark)
+    return recorded_mark(pos)
 
 
 def _positions_with_marks(open_positions) -> list:
     """Return the open positions that carry a recorded market mark."""
-    return [pos for pos in open_positions if _recorded_mark(pos) is not None]
+    return positions_with_marks(open_positions)
 
 
 def _equity_display(summary, open_positions) -> str:
@@ -1108,18 +1106,24 @@ async def stats_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """Show paper trading performance dashboard."""
-    service = _get_paper_service()
-    summary = service.summary()
-    closed_positions = service.closed_positions()
-    open_positions = service.open_positions()
+    view = stats_view(
+        _get_paper_service(),
+        portfolio_risk_limit=settings.PORTFOLIO_RISK_LIMIT,
+        portfolio_exposure_limit=settings.PORTFOLIO_EXPOSURE_LIMIT,
+        daily_loss_limit=settings.PORTFOLIO_DAILY_LOSS_LIMIT,
+        max_open_positions=settings.PORTFOLIO_MAX_OPEN_POSITIONS,
+        max_positions_per_symbol=(
+            settings.PORTFOLIO_MAX_POSITIONS_PER_SYMBOL
+        ),
+        max_exposure_per_symbol=settings.PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL,
+        collect_gate_metrics=collect_entry_gate_metrics,
+    )
+    summary = view.summary
+    closed_positions = view.closed_positions
+    open_positions = view.open_positions
 
     # --- Section 1: Account ---
-    total_return = (
-        ((summary.current_balance - summary.initial_balance)
-         / summary.initial_balance * 100.0)
-        if summary.initial_balance != 0.0
-        else 0.0
-    )
+    total_return = view.total_return
     return_str = _format_pnl_value(total_return)
     if total_return > 0:
         return_str = f"+{total_return:.2f}%"
@@ -1144,7 +1148,7 @@ async def stats_command(
         return
 
     # --- Section 2: Overall Performance ---
-    overall = compute_overall_performance(closed_positions)
+    overall = view.overall
     message += (
         f"\n\n━━━━━━━━━━━━━━━━━━━\n"
         f"📈 Overall Performance\n"
@@ -1163,7 +1167,7 @@ async def stats_command(
     )
 
     # --- Section 3: Risk Metrics ---
-    risk = compute_risk_metrics(closed_positions)
+    risk = view.risk
     message += (
         f"\n\n━━━━━━━━━━━━━━━━━━━\n"
         f"⚠️ Risk Metrics\n"
@@ -1177,23 +1181,7 @@ async def stats_command(
     )
 
     # --- Sections 3b-3f: Entry gate metrics (Sprints 7A-8B) ---
-    # One collector call reports every enabled gate without
-    # short-circuiting; a gate whose limit is not configured (<= 0)
-    # comes back as None and its section is omitted, exactly as when
-    # each section read its own manager.
-    gate_metrics = collect_entry_gate_metrics(
-        service.execution_backend(),
-        portfolio_risk_limit=settings.PORTFOLIO_RISK_LIMIT,
-        portfolio_exposure_limit=settings.PORTFOLIO_EXPOSURE_LIMIT,
-        daily_loss_limit=settings.PORTFOLIO_DAILY_LOSS_LIMIT,
-        max_open_positions=settings.PORTFOLIO_MAX_OPEN_POSITIONS,
-        max_positions_per_symbol=(
-            settings.PORTFOLIO_MAX_POSITIONS_PER_SYMBOL
-        ),
-        max_exposure_per_symbol=(
-            settings.PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL
-        ),
-    )
+    gate_metrics = view.gate_metrics
 
     if gate_metrics.portfolio_risk is not None:
         prm = gate_metrics.portfolio_risk
@@ -1275,7 +1263,7 @@ async def stats_command(
         )
 
     # --- Section 4: Per Symbol ---
-    symbol_groups = group_by_symbol(closed_positions)
+    symbol_groups = view.symbol_groups
     message += "\n\n━━━━━━━━━━━━━━━━━━━\n📎 Per Symbol\n━━━━━━━━━━━━━━━━━━━\n"
     for sp in symbol_groups:
         pf_str = _format_infnan(sp.profit_factor)
@@ -1289,7 +1277,7 @@ async def stats_command(
         )
 
     # --- Section 5: Recent Trades ---
-    recent = get_recent_trades(closed_positions, limit=10)
+    recent = view.recent_trades
     message += "\n\n━━━━━━━━━━━━━━━━━━━\n📜 Recent Trades (last 10)\n━━━━━━━━━━━━━━━━━━━\n"
     for pos in recent:
         label = _format_pnl_label(pos)
