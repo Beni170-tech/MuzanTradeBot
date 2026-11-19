@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import TYPE_CHECKING
 
@@ -30,6 +31,7 @@ from trader.paper.analytics import (
     get_recent_trades,
     group_by_symbol,
 )
+from trader.paper.daily_risk import trade_day
 from trader.paper.entry_gates import collect_entry_gate_metrics
 from trader.paper.order import PaperOrder, PaperOrderStatus
 from trader.paper.rules import is_valid_exit_price
@@ -45,6 +47,10 @@ if TYPE_CHECKING:
 RECENT_CLOSED_LIMIT = 5
 # Recent closed positions shown by /history.
 RECENT_HISTORY_LIMIT = 10
+# Calendar days covered by the /report "last 7 days" window.
+REPORT_WINDOW_DAYS = 7
+# Symbols itemised by /report; the rest are summarised as a count.
+REPORT_SYMBOL_LIMIT = 5
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +328,20 @@ class PaperStatsView:
     recent_trades: list[PaperOrder]
 
 
+def total_return_percent(summary: PaperAccountSummary) -> float:
+    """Return the account's return as a percentage of the initial balance.
+
+    A zero initial balance reports 0.0 instead of dividing by zero.
+    """
+    if summary.initial_balance == 0.0:
+        return 0.0
+    return (
+        (summary.current_balance - summary.initial_balance)
+        / summary.initial_balance
+        * 100.0
+    )
+
+
 def stats_view(
     service: PaperTradingService,
     *,
@@ -338,14 +358,7 @@ def stats_view(
     closed_positions = service.closed_positions()
     open_positions = service.open_positions()
 
-    if summary.initial_balance != 0.0:
-        total_return = (
-            (summary.current_balance - summary.initial_balance)
-            / summary.initial_balance
-            * 100.0
-        )
-    else:
-        total_return = 0.0
+    total_return = total_return_percent(summary)
 
     if not closed_positions:
         return PaperStatsView(
@@ -387,4 +400,101 @@ def stats_view(
         gate_metrics=gate_metrics,
         symbol_groups=group_by_symbol(closed_positions),
         recent_trades=get_recent_trades(closed_positions, limit=10),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Performance report (/report)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class PerformanceWindow:
+    """Performance for one reporting period.
+
+    ``risk`` is None for the short windows, whose sample is too small for
+    profit-factor and streak statistics to mean anything.
+    """
+
+    overall: OverallPerformance
+    risk: RiskMetrics | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PaperReportView:
+    """Read model backing ``/report``.
+
+    The command is a period summary (all time, today, last seven days and
+    per symbol) built from the existing analytics functions; entry-gate
+    metrics stay on ``/stats``.
+    """
+
+    summary: PaperAccountSummary
+    open_positions: list[PaperOrder]
+    total_return: float
+    today_label: str
+    week_start_label: str
+    all_time: PerformanceWindow | None
+    today: PerformanceWindow
+    week: PerformanceWindow
+    symbol_groups: list[SymbolPerformance]
+    symbol_count: int
+
+
+def _closed_between(
+    closed_positions: Sequence[PaperOrder], start_day: str, end_day: str
+) -> list[PaperOrder]:
+    """Return positions whose exit date falls in ``start_day..end_day``.
+
+    Both bounds are inclusive ``YYYY-MM-DD`` labels, so plain string
+    comparison is exact. Positions without a usable exit date are
+    excluded rather than assumed to be recent.
+    """
+    return [
+        position
+        for position in closed_positions
+        if start_day <= trade_day(position.exit_at) <= end_day
+    ]
+
+
+def report_view(
+    service: PaperTradingService,
+    *,
+    now: datetime | None = None,
+) -> PaperReportView:
+    """Build the ``/report`` read model from the paper account history."""
+    summary = service.summary()
+    open_positions = list(service.open_positions())
+    closed_positions = list(service.closed_positions())
+
+    reference = now if now is not None else datetime.now()
+    today_label = reference.strftime("%Y-%m-%d")
+    week_start_label = (reference - timedelta(days=REPORT_WINDOW_DAYS - 1)).strftime(
+        "%Y-%m-%d"
+    )
+
+    today_closed = _closed_between(closed_positions, today_label, today_label)
+    week_closed = _closed_between(closed_positions, week_start_label, today_label)
+
+    all_time: PerformanceWindow | None = None
+    if closed_positions:
+        all_time = PerformanceWindow(
+            overall=compute_overall_performance(closed_positions),
+            risk=compute_risk_metrics(closed_positions),
+        )
+
+    symbol_groups = group_by_symbol(closed_positions)
+    return PaperReportView(
+        summary=summary,
+        open_positions=open_positions,
+        total_return=total_return_percent(summary),
+        today_label=today_label,
+        week_start_label=week_start_label,
+        all_time=all_time,
+        today=PerformanceWindow(
+            overall=compute_overall_performance(today_closed)
+        ),
+        week=PerformanceWindow(overall=compute_overall_performance(week_closed)),
+        symbol_groups=symbol_groups[:REPORT_SYMBOL_LIMIT],
+        symbol_count=len(symbol_groups),
     )

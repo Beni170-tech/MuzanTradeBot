@@ -41,8 +41,11 @@ if TYPE_CHECKING:
 # Pure per-day calculation helpers
 # ---------------------------------------------------------------------------
 
-def _day_of(timestamp: str | None) -> str:
+def trade_day(timestamp: str | None) -> str:
     """Extract the ``YYYY-MM-DD`` day label from a naive timestamp.
+
+    Shared by the daily loss brake and the performance report so both
+    read exit dates identically.
 
     Args:
         timestamp: A timestamp string such as ``2026-09-07 14:30:00``
@@ -57,6 +60,10 @@ def _day_of(timestamp: str | None) -> str:
     if isinstance(timestamp, str) and len(timestamp) >= 10:
         return timestamp[:10]
     return ""
+
+
+# Backwards-compatible private alias for existing internal callers.
+_day_of = trade_day
 
 
 def realized_pnl_on_day(

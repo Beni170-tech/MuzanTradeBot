@@ -39,6 +39,7 @@ from trader.paper.read_model import (
     parse_close_request,
     positions_with_marks,
     recorded_mark,
+    report_view,
     select_close_target,
     stats_view,
 )
@@ -109,6 +110,7 @@ from trader.paper.analysis_service import (
     run_analysis_pipeline,
 )
 from telegram_bot.auth import authorization_status
+from dashboard.report import format_report_message
 from telegram_bot.settings_report import format_settings_message
 from telegram_bot.rate_limit import (
     build_rate_limit_config,
@@ -481,6 +483,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/close <SYMBOL> <EXIT_PRICE> [ORDER_ID] - Close a paper position\n"
         "  (ORDER_ID is required when several positions share a symbol)\n"
         "/stats - Show paper trading performance dashboard\n"
+        "/report - Show the paper performance report (all time, today, "
+        "7 days, by symbol)\n"
         "/settings - Show execution mode, limits, access and alerts"
     )
     await update.message.reply_text(message)
@@ -1037,6 +1041,17 @@ def trade_risk_value(trade) -> float:
     both this value and the entry-gate rejection text built from it.
     """
     return trade_risk(trade)
+
+
+async def report_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Show the paper trading performance report."""
+    if await _rate_limited(update):
+        return
+
+    view = report_view(_get_paper_service())
+    await update.message.reply_text(format_report_message(view))
 
 
 async def stats_command(
