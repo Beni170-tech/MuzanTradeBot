@@ -69,6 +69,29 @@ def main():
             "command will be denied."
         )
 
+    # Report the persisted pause control state at startup. This is
+    # read-only: it never resumes trading and never rewrites the control
+    # file. Unreadable state is reported as blocked, matching the
+    # fail-closed behaviour of the pause module.
+    from trader.paper.pause import read_pause_state
+
+    pause_state = read_pause_state()
+    if pause_state.degraded:
+        print(
+            "[WARN] Paper pause state is unreadable; new paper entries are "
+            "BLOCKED because the pause state cannot be trusted."
+        )
+    elif pause_state.paused:
+        reason = (
+            f" (reason: {pause_state.reason})" if pause_state.reason else ""
+        )
+        print(
+            f"[WARN] Paper trading is manually PAUSED; new entries are "
+            f"blocked{reason}."
+        )
+    else:
+        print("[INFO] Paper trading is not manually paused.")
+
     # Start Telegram bot
     print("\nStarting Telegram bot...")
     from telegram_bot.bot import run_bot
