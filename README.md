@@ -6,23 +6,228 @@ A professional Telegram crypto trading assistant built to protect capital first.
 
 MuzanTradeBot is designed to provide automated trading assistance via Telegram with a primary focus on capital preservation and risk management. The bot will execute trades only after passing rigorous safety checks.
 
+## Paper Trading Only
+
+Every execution path in this repository is simulated paper trading. No
+live order is ever placed, and there is no live execution backend:
+
+- `EXECUTION_MODE` accepts only `PAPER`. An unrecognized value is an
+  unsafe configuration and the bot refuses to start.
+- `PAPER_TRADING` remains the runtime switch. A `PAPER_TRADING=true`
+  configuration must also use `EXECUTION_MODE=PAPER`.
+- Telegram replies label the results as paper trades, and `/report`
+  ends with a paper-only notice.
+
 ## Current Version
 
 0.1.0 - Foundation Ready
+
+## Installation
+
+Requirements: Python 3.12 (the version this project is developed and
+tested with), `python-telegram-bot>=22.0` and `python-dotenv>=1.0.0`.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+
+cp .env.example .env             # then edit .env
+python main.py
+```
+
+`main.py` refuses to start when configuration validation finds an error
+(a negative limit, a non-finite number, a zero `RISK_PERCENT`), when
+`EXECUTION_MODE` is not valid for the current `PAPER_TRADING` intent, or
+when `TELEGRAM_BOT_TOKEN` is missing. Warnings for disabled safety
+limits are printed without blocking startup. Values are never printed,
+only setting names and the reason.
+
+## Configuration
+
+Settings are read from `.env` in the project root (see `.env.example`
+for the annotated reference). The file is git-ignored; never commit real
+credentials. `/settings` and `/status` show configuration and access
+state but never a token, API key or authorized id.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `TELEGRAM_BOT_TOKEN` | - (required) | Bot token from @BotFather. |
+| `TELEGRAM_ALLOWED_CHAT_IDS` | empty | Authorized user and/or chat ids. Empty locks the bot. |
+| `EXECUTION_MODE` | `PAPER` | Execution backend. Only `PAPER` is valid. |
+| `PAPER_TRADING` | `true` | Runtime paper-trading switch. |
+| `GUARDIAN_MODE` | `true` | Guardian Mode label and safety posture. |
+| `ACCOUNT_BALANCE` | `1000` | Starting balance for a new paper account. |
+| `RISK_PERCENT` | `2.0` | Percent of current paper equity risked per trade. |
+| `STOP_LOSS_PERCENT` | `2.0` | Stop-loss distance from the entry price. |
+| `TAKE_PROFIT_PERCENT` | `4.0` | Take-profit distance from the entry price. |
+| `PAPER_MONITOR_INTERVAL_SECONDS` | `45` | Background monitor cycle; `<= 0` disables it. |
+| `TELEGRAM_COMMAND_RATE_LIMIT_PER_WINDOW` | `12` | Commands per chat per window; `<= 0` disables. |
+| `TELEGRAM_COMMAND_RATE_WINDOW_SECONDS` | `10` | Rate-limit window length; `<= 0` disables. |
+| `ALERTS_ENABLED` | `false` | Push-notification master switch. |
+| `TELEGRAM_ALERT_CHAT_ID` | empty | Chat alerts are sent to. |
+
+Portfolio limits (`PORTFOLIO_RISK_LIMIT`,
+`PORTFOLIO_EXPOSURE_LIMIT`, `PORTFOLIO_DAILY_LOSS_LIMIT`,
+`PORTFOLIO_MAX_OPEN_POSITIONS`, `PORTFOLIO_MAX_POSITIONS_PER_SYMBOL`,
+`PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL`) all default to `0`, which disables
+that limit. See [Guardian Limits](#guardian-limits-and-entry-gates).
+Exchange API keys (`BINANCE_*`, `BYBIT_*`, `KRAKEN_*`) may be set for
+future use; no live backend consumes them.
+
+## Telegram Authorization
+
+Access is denied by default and enforced in one place:
+
+1. Set `TELEGRAM_ALLOWED_CHAT_IDS` to a comma-separated list of
+   Telegram user ids and/or chat ids, for example
+   `TELEGRAM_ALLOWED_CHAT_IDS=123456789,-1001234567890`. Use
+   @userinfobot to find your user id; a group is listed by its negative
+   chat id.
+2. A private chat can be authorized by user id, a group by chat id: an
+   update is allowed when **either** its effective user id or its
+   effective chat id is listed.
+3. Leave the variable empty and the bot stays **locked**: no command,
+   callback or account read runs.
+4. Invalid entries are ignored rather than treated as a wildcard. If no
+   entry parses to a usable id, the bot remains locked.
+
+A single `TypeHandler` authorization gate is installed in handler group
+`-1`, before any command handler, so new commands are covered
+automatically. Unauthorized updates receive
+`⛔ Unauthorized. This bot is private.` and are stopped from
+propagating; the denial identifies no account, limit or configuration
+detail. The allowlist is re-read on every update, so a corrected `.env`
+plus restart is enough to change access. `/settings` and `/status`
+report only `locked` or a count of authorized ids, never the ids.
+
+## Commands
+
+Every command except `/stats` shares the per-chat rate limit above.
+
+| Command | Description |
+| --- | --- |
+| `/start` | Show Guardian Mode and paper-trading status. |
+| `/help` | List the available commands. |
+| `/ping` | Liveness check. |
+| `/version` | Bot version. |
+| `/analyze <COIN>` | Analyze a coin (BTC, ETH, SOL), price it from a fresh quote, run the Guardian checks and place a paper trade only if every check passes. |
+| `/paper` | Paper account summary: balance, equity, open and closed counts. |
+| `/positions` | Open paper positions with entry price, quantity and the last recorded market mark (reported as unavailable when none exists). |
+| `/history` | Closed paper trades. |
+| `/close <SYMBOL> <EXIT_PRICE> [ORDER_ID]` | Close a paper position at an explicit exit price. `ORDER_ID` is required when several positions share the symbol. |
+| `/stats` | Paper performance dashboard, including the entry gates and current limits. |
+| `/settings` | Execution mode, Guardian limits, authorization state and alert configuration. |
+| `/report` | Period report: account, all time, today, last 7 days and per-symbol results. Entry-gate metrics stay on `/stats`. |
+| `/pause [reason]` | Block new paper entries; open positions stay monitored. |
+| `/resume` | Allow new paper entries again. |
+| `/status` | Operational status: runtime, new entries, monitor, paper account, journal and rate limit. |
+
+`/report` and `/status` render from `dashboard/report.py` and
+`dashboard/status.py`; the handlers only gather values, so the reports
+never read account state or place orders themselves.
+
+## Guardian Limits and Entry Gates
+
+`/analyze` runs these checks in this order and stops at the first
+rejection:
+
+1. Historical analysis, signal and confidence from hourly candles.
+2. A fresh market quote for the trade price (never the last candle
+   close).
+3. Risk validation of the decision and position sizing from current
+   paper equity.
+4. Stop-loss/take-profit checks on any **existing** position in the
+   symbol, then trailing-stop updates.
+5. The global pause control (see below).
+6. Portfolio entry gates: portfolio risk -> portfolio exposure -> daily
+   loss -> maximum open positions -> symbol concentration (position
+   count, then exposure).
+7. Paper order placement.
+
+| Limit | Meaning when above 0 |
+| --- | --- |
+| `PORTFOLIO_RISK_LIMIT` | Maximum total dollar risk across open positions. |
+| `PORTFOLIO_EXPOSURE_LIMIT` | Maximum total notional exposure. |
+| `PORTFOLIO_DAILY_LOSS_LIMIT` | Maximum net realized loss per calendar day; new entries halt until the next day. |
+| `PORTFOLIO_MAX_OPEN_POSITIONS` | Maximum open positions across all symbols. |
+| `PORTFOLIO_MAX_POSITIONS_PER_SYMBOL` | Maximum open positions on one symbol. |
+| `PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL` | Maximum notional exposure on one symbol. |
+
+A limit `<= 0` disables that gate entirely, so it performs no account
+reads. A negative limit is a configuration error and blocks startup.
+Stop-loss and take-profit levels are mandatory on every paper trade, and
+a disabled or stale market mark blocks new sizing rather than falling
+back to an entry price or the configured balance.
+
+## Pausing and Resuming
+
+`/pause [reason]` and `/resume` write a small control file,
+`logs/paper_pause.json`, so the state survives a restart:
+
+```json
+{"paused": true, "reason": "maintenance", "updated_at": "2026-11-19 10:00:00"}
+```
+
+- **Pause blocks new entries only.** Existing positions keep being
+  monitored; stop-loss, take-profit, trailing stops and `/close` all
+  keep working.
+- Writes are atomic. If the state cannot be written, the command replies
+  that it could not save the pause state and paper trading is unchanged
+  instead of claiming success.
+- A missing file means no pause was requested. Corrupt JSON, an
+  unexpected shape or a non-boolean `paused` field is treated as
+  **paused** (fail closed), and `/status` shows `BLOCKED (pause control
+  state is unreadable)`; fix or remove the file, then use `/resume`.
+- The reason is collapsed to one line and truncated at 200 characters.
+
+## Trade Journal and State Files
+
+All state lives under `logs/`, which is git-ignored:
+
+| File | Contents |
+| --- | --- |
+| `logs/trade_journal.jsonl` | Structured trade journal, one JSON object per line. |
+| `logs/trade_journal.jsonl.1` .. `.5` | Rotated backups; `.1` is the newest. |
+| `logs/paper_state.json` | Paper account, positions and marks. |
+| `logs/paper_pause.json` | Pause control (see above). |
+| `logs/trade_journal.txt` | Legacy plain-text journal, left untouched. |
+
+Each journal record is `{"timestamp", "symbol", "decision",
+"risk_verdict"}` for every validated trade decision, including rejected
+ones. The journal rotates before appending once the active file would
+exceed 1 MB, keeping five backups. A write failure is logged and
+reported through `/status` (`Last Error`), never raised: a broken
+journal cannot block an `/analyze` reply or look like a placed trade.
+`/status` shows the path, size, backup count and last write time.
+
+## Testing
+
+```bash
+pip install -r requirements-dev.txt pytest-asyncio
+python -m pytest -q
+```
+
+`pytest-asyncio` provides the async test fixtures and is installed
+separately. The suite runs without Telegram, network access or a real
+`.env`: tests redirect state files to temporary directories and
+monkeypatch the existing handler seams.
 
 ## Project Structure
 
 - `brain/` - Core AI and decision-making logic
 - `market/` - Market data and analysis
-- `trader/` - Trade execution logic
+- `trader/` - Trade execution logic (`trader/paper/` holds the paper
+  account, gates, monitor, pause control and read models)
 - `alerts/` - Notification and alert system
 - `risk/` - Risk management and safety checks
-- `journal/` - Trade journaling and logging
-- `dashboard/` - Monitoring and status dashboard
-- `config/` - Configuration management
-- `logs/` - Application logs (git-ignored)
+- `journal/` - Structured trade journal
+- `dashboard/` - `/report` and `/status` rendering
+- `telegram_bot/` - Handlers, authorization gate, rate limiting and
+  bot wiring
+- `config/` - Configuration and startup validation
+- `logs/` - Application state and logs (git-ignored)
 - `tests/` - Test suite
-- `docs/` - Documentation
 
 ## Background Paper Position Monitor
 
