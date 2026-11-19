@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -105,10 +106,13 @@ def append_entry(
 
     Never raises for a write or serialization failure: the problem is
     logged, remembered for :func:`journal_status`, and reported through
-    the return value.
+    the return value. Success is only reported after the record has been
+    flushed and fsynced to disk, and the handle is closed on every path,
+    including a failed flush or fsync.
 
     Returns:
-        True when the record was written, False when it was not.
+        True when the record was written and forced to disk, False when
+        it was not.
     """
     global _last_error
 
@@ -129,6 +133,11 @@ def append_entry(
 
         with open(journal_path, "a", encoding="utf-8") as handle:
             handle.write(line)
+            # A record that only reached a process buffer can be lost in
+            # a crash, so flush and fsync before reporting success. The
+            # context manager still closes the handle if either fails.
+            handle.flush()
+            os.fsync(handle.fileno())
     except (OSError, TypeError, ValueError) as exc:
         _last_error = f"{type(exc).__name__}: {exc}"
         logger.warning("Trade journal write failed (%s): %s", journal_path, exc)

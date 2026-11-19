@@ -157,3 +157,92 @@ def test_journal_status_reports_size_rotation_and_last_write(tmp_path):
     assert status.size_bytes == journal.stat().st_size
     assert status.last_write_at is not None
     assert status.rotated_files >= 1
+
+
+# ---------------------------------------------------------------------------
+# Durability: flush + fsync before success
+# ---------------------------------------------------------------------------
+
+
+class _RecordingHandle:
+    """Minimal file handle that records flush/close calls for tests."""
+
+    def __init__(self, *, flush_error: Exception | None = None) -> None:
+        self.flush_error = flush_error
+        self.flushed = 0
+        self.closed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.closed = True
+        return False
+
+    def write(self, text: str) -> int:
+        return len(text)
+
+    def flush(self) -> None:
+        self.flushed += 1
+        if self.flush_error is not None:
+            raise self.flush_error
+
+    def fileno(self) -> int:
+        return 42
+
+
+def test_successful_append_flushes_and_fsyncs(tmp_path, monkeypatch):
+    import journal.journal as journal_module
+
+    journal = tmp_path / "trade_journal.jsonl"
+    fsynced = []
+    monkeypatch.setattr(
+        journal_module.os, "fsync", lambda fd: fsynced.append(fd)
+    )
+
+    assert append_entry({"n": 1}, path=journal) is True
+
+    assert len(fsynced) == 1
+    assert _records(journal) == [{"n": 1}]
+    assert journal_status(journal).last_error is None
+
+
+def test_flush_failure_is_reported_and_closes_handle(tmp_path, monkeypatch):
+    import journal.journal as journal_module
+
+    journal = tmp_path / "trade_journal.jsonl"
+    handle = _RecordingHandle(flush_error=OSError("flush failed"))
+    monkeypatch.setattr(
+        journal_module, "open", lambda *a, **k: handle, raising=False
+    )
+    fsynced = []
+    monkeypatch.setattr(
+        journal_module.os, "fsync", lambda fd: fsynced.append(fd)
+    )
+
+    assert append_entry({"n": 1}, path=journal) is False
+
+    assert handle.closed is True
+    assert fsynced == []
+    assert "flush failed" in journal_status(journal).last_error
+
+
+def test_fsync_failure_is_reported_and_closes_handle(tmp_path, monkeypatch):
+    import journal.journal as journal_module
+
+    journal = tmp_path / "trade_journal.jsonl"
+    handle = _RecordingHandle()
+    monkeypatch.setattr(
+        journal_module, "open", lambda *a, **k: handle, raising=False
+    )
+
+    def _fail_fsync(fd) -> None:
+        raise OSError("fsync failed")
+
+    monkeypatch.setattr(journal_module.os, "fsync", _fail_fsync)
+
+    assert append_entry({"n": 1}, path=journal) is False
+
+    assert handle.flushed == 1
+    assert handle.closed is True
+    assert "fsync failed" in journal_status(journal).last_error
