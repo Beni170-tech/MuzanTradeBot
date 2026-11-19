@@ -183,6 +183,7 @@ class CloseResult:
 
     order: PaperOrder
     new_balance: float
+    persisted: bool = True
 
 
 def parse_close_request(
@@ -288,18 +289,37 @@ def execute_close(
 ) -> CloseResult | None:
     """Close the selected position, persist state and report the balance.
 
+    The account is persisted once before the close, so an unwritable
+    state path reports "nothing was closed" without mutating memory. If
+    the post-close save fails, ``persisted`` is False: the caller must
+    say so instead of reporting a close that a restart could undo.
+
     Returns None when the service could not close the position, leaving
     storage untouched exactly as before.
     """
+    # Pre-flight write of the unchanged account. This is the cheap way to
+    # prove storage is usable before any in-memory mutation happens.
+    try:
+        service.save_account(state_path)
+    except (OSError, ValueError):
+        return None
+
     order = service.close_position_by_id(
         target.order_id, exit_price, PaperOrderStatus.CLOSED_MANUAL
     )
     if order is None:
         return None
 
-    service.save_account(state_path)
+    persisted = True
+    try:
+        service.save_account(state_path)
+    except (OSError, ValueError):
+        persisted = False
+
     return CloseResult(
-        order=order, new_balance=service.summary().current_balance
+        order=order,
+        new_balance=service.summary().current_balance,
+        persisted=persisted,
     )
 
 

@@ -59,6 +59,16 @@ def main():
         print("See .env.example for reference.")
         sys.exit(1)
 
+    # Warn (never crash) when the allowlist is empty: the bot then runs
+    # locked and answers every update with a denial notice.
+    from telegram_bot.auth import parse_allowlist
+
+    if not parse_allowlist(settings.TELEGRAM_ALLOWED_CHAT_IDS):
+        print(
+            "[WARN] TELEGRAM_ALLOWED_CHAT_IDS: empty; every Telegram "
+            "command will be denied."
+        )
+
     # Start Telegram bot
     print("\nStarting Telegram bot...")
     from telegram_bot.bot import run_bot

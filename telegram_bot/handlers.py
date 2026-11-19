@@ -266,12 +266,41 @@ def _monitor_status() -> str:
         return "unknown"
 
 
+class PaperStateUnreadable(RuntimeError):
+    """Raised when a saved paper account exists but cannot be trusted.
+
+    A fresh account is never substituted for an unreadable one: doing so
+    would invent a balance and let trades be sized from it. Callers must
+    report the problem and leave trading untouched.
+    """
+
+
 def _get_paper_service() -> PaperTradingService:
-    """Get or create the paper trading service (lazy initialization)."""
+    """Get or create the paper trading service (lazy initialization).
+
+    Raises:
+        PaperStateUnreadable: When the state file exists but cannot be
+            read or validated. No account is created in that case.
+    """
     global _paper_service
     if _paper_service is None:
         if PAPER_STATE_PATH.exists():
-            _paper_service = PaperTradingService.load_account(PAPER_STATE_PATH)
+            try:
+                _paper_service = PaperTradingService.load_account(
+                    PAPER_STATE_PATH
+                )
+            except (OSError, ValueError) as exc:
+                logger.error(
+                    "Paper account state %s is unreadable; refusing to "
+                    "trade from it: %s",
+                    PAPER_STATE_PATH,
+                    exc,
+                )
+                raise PaperStateUnreadable(
+                    "the paper account state file is unreadable. No trading "
+                    "action was taken. Restore or fix the state file, then "
+                    "retry."
+                ) from exc
         else:
             _paper_service = PaperTradingService.create_new_account(
                 settings.ACCOUNT_BALANCE
@@ -672,6 +701,14 @@ def _format_analysis_message(run: AnalysisRun) -> str:
             f"   Take Profit: ${paper_order.take_profit:.2f}\n"
             f"   Side: {paper_order.side.value}"
         )
+    elif run.status is AnalysisStatus.PAPER_NOT_PLACED:
+        message += (
+            "\n\n⚠️ Paper Order: NOT PLACED\n"
+            "   No new paper position was opened by this request.\n"
+            "   The paper broker rejected the order (most often because an\n"
+            "   identical position is already open).\n"
+            "   Check /positions before retrying."
+        )
     elif run.status is AnalysisStatus.PAPER_FAILED:
         message += (
             "\n\n❌ Paper Execution Failed\n"
@@ -981,7 +1018,7 @@ async def close_command(
     order = result.order
     new_balance = result.new_balance
 
-    await update.message.reply_text(
+    message = (
         f"✅ Position Closed\n\n"
         f"Symbol: {order.symbol}\n"
         f"Order ID: {order.order_id}\n"
@@ -990,6 +1027,15 @@ async def close_command(
         f"Realized PnL: ${order.realized_pnl:.2f} ({_format_pnl_label(order)})\n"
         f"Updated Balance: ${new_balance:.2f}"
     )
+    if not result.persisted:
+        message += (
+            "\n\n⚠️ The close could not be saved to disk.\n"
+            "   The account in memory is updated, but a restart before the "
+            "next\n"
+            "   successful save may restore this position.\n"
+            "   Check /status and the bot logs."
+        )
+    await update.message.reply_text(message)
 
 
 # ---------------------------------------------------------------------------

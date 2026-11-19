@@ -4,6 +4,8 @@ Sets up the Telegram Application and registers handlers.
 """
 
 import logging
+import sys
+
 from telegram.ext import Application, CommandHandler
 
 from config.settings import settings
@@ -12,6 +14,7 @@ from telegram_bot.auth import (
     install_authorization_gate,
 )
 from telegram_bot.handlers import (
+    PaperStateUnreadable,
     bind_monitor_status_provider,
     start,
     help_command,
@@ -49,6 +52,37 @@ def _monitor_status() -> str:
 bind_monitor_status_provider(_monitor_status)
 
 
+async def _error_handler(update, context) -> None:
+    """Reply when a handler fails; never claim an action succeeded.
+
+    A known state problem is explained in plain language. Anything else
+    gets a neutral notice, because the failed command may or may not have
+    changed in-memory state — the user is told to check, not to retry
+    blindly.
+    """
+    error = context.error
+    logger.error("Telegram command failed: %s", error, exc_info=error)
+
+    if isinstance(error, PaperStateUnreadable):
+        text = f"⚠️ {error}"
+    else:
+        text = (
+            "⚠️ That command failed unexpectedly.\n"
+            "   No completed trading action is reported.\n"
+            "   Check /status and the bot logs before retrying."
+        )
+
+    message = getattr(update, "effective_message", None) if update else None
+    reply = getattr(message, "reply_text", None)
+    if callable(reply):
+        try:
+            await reply(text)
+        except Exception:
+            logger.warning(
+                "Could not send the command-failure notice.", exc_info=True
+            )
+
+
 def build_application() -> Application:
     """Build and configure the Telegram Application."""
     app = Application.builder().token(settings.TELEGRAM_BOT_TOKEN).build()
@@ -77,6 +111,11 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("resume", resume_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("settings", settings_command))
+
+    # Fail visibly, never silently: without this, an unexpected error
+    # leaves the user with no reply at all and no idea whether an action
+    # happened.
+    app.add_error_handler(_error_handler)
 
     logger.info("Telegram application built successfully.")
     return app
@@ -164,7 +203,15 @@ def run_bot() -> None:
     app.post_shutdown = _shutdown_paper_monitor
 
     # Build the monitor when configured; it is started by post_init.
-    _paper_monitor = _build_paper_monitor()
+    # An unreadable account state stops startup: running without the
+    # account (or with an invented one) is not acceptable for a trading
+    # product.
+    try:
+        _paper_monitor = _build_paper_monitor()
+    except PaperStateUnreadable as exc:
+        print("\n[ERROR] Paper account state is unreadable; refusing to start.")
+        print(f"  {exc}")
+        sys.exit(1)
 
     print("Bot application created.")
     print("Starting polling...")
