@@ -437,3 +437,36 @@ class TestRateLimitSettingsWiring:
 
         await record_start()
         assert "Too many requests" in calls[-1]
+
+
+# ---------------------------------------------------------------------------
+# State hygiene (Milestone M-C)
+# ---------------------------------------------------------------------------
+
+def test_expired_chat_windows_are_pruned_once_the_table_grows():
+    """Idle chats must not accumulate forever in a long-running bot."""
+    from telegram_bot.rate_limit import _ChatWindow, _RateLimitState
+
+    state = _RateLimitState()
+    config = RateLimitConfig(commands_per_window=1, window_seconds=10.0)
+    for chat_id in range(300):
+        state._windows[chat_id] = _ChatWindow(window_start=0.0, count=1)
+
+    assert state.record_and_check(9999, config, now=1000.0) is True
+    assert list(state._windows) == [9999]
+
+
+def test_live_windows_survive_pruning():
+    """Pruning never drops a window that is still counting."""
+    from telegram_bot.rate_limit import _ChatWindow, _RateLimitState
+
+    state = _RateLimitState()
+    config = RateLimitConfig(commands_per_window=2, window_seconds=10.0)
+    for chat_id in range(300):
+        state._windows[chat_id] = _ChatWindow(window_start=0.0, count=1)
+    state._windows[1] = _ChatWindow(window_start=995.0, count=1)
+
+    assert state.record_and_check(2, config, now=1000.0) is True
+    assert state.record_and_check(1, config, now=1000.0) is True
+    assert state._windows[1].count == 2
+    assert state.record_and_check(1, config, now=1000.0) is False

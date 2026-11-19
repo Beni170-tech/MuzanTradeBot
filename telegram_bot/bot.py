@@ -12,6 +12,7 @@ from telegram_bot.auth import (
     install_authorization_gate,
 )
 from telegram_bot.handlers import (
+    bind_monitor_status_provider,
     start,
     help_command,
     ping,
@@ -25,6 +26,7 @@ from telegram_bot.handlers import (
     report_command,
     resume_command,
     stats_command,
+    status_command,
     settings_command,
 )
 from trader.paper.monitor import PaperPositionMonitor
@@ -33,6 +35,18 @@ logger = logging.getLogger(__name__)
 
 # Module-level monitor so it can be referenced by run_bot() for shutdown.
 _paper_monitor: PaperPositionMonitor | None = None
+
+
+def _monitor_status() -> str:
+    """Report whether the background paper monitor is running."""
+    monitor = _paper_monitor
+    if monitor is None:
+        return "disabled"
+    return "running" if monitor.is_running else "stopped"
+
+
+# Let /status report the monitor this module owns.
+bind_monitor_status_provider(_monitor_status)
 
 
 def build_application() -> Application:
@@ -61,6 +75,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("report", report_command))
     app.add_handler(CommandHandler("pause", pause_command))
     app.add_handler(CommandHandler("resume", resume_command))
+    app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("settings", settings_command))
 
     logger.info("Telegram application built successfully.")

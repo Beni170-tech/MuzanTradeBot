@@ -12,13 +12,15 @@ Design notes:
   test without touching the rest of the bot.
 - The handler integration is explicit: handlers call the helper and
   return early with a friendly message when rate limited.
+- Idle chats are pruned once the table grows, so a long-running bot
+  cannot accumulate unbounded windows from one-off chats (Milestone M-C).
 """
 
 from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,10 @@ DEFAULT_COMMANDS_PER_WINDOW = 12
 
 # Default window length in seconds.
 DEFAULT_WINDOW_SECONDS = 10.0
+
+# Prune expired chat windows once the table grows past this many entries.
+# Kept high enough that normal use never pays for a scan.
+_PRUNE_THRESHOLD = 256
 
 
 @dataclass
@@ -86,15 +92,23 @@ class _RateLimitState:
         self._windows: dict[int, _ChatWindow] = {}
 
     def clear(self) -> None:
+        """Forget every chat window."""
         self._windows.clear()
 
-    def record_and_check(self, now: float) -> None:
-        """Set the synthetic clock used by this state.
+    def _prune_expired(self, now: float, config: RateLimitConfig) -> None:
+        """Drop windows that have fully expired.
 
-        This exists so tests can control time without touching
-        ``time.monotonic`` directly.
+        An expired window would be reset on its next command anyway, so
+        removing it cannot change any decision; it only keeps the table
+        bounded when many distinct chats have been seen.
         """
-        self._now = now
+        expired = [
+            chat_id
+            for chat_id, window in self._windows.items()
+            if now - window.window_start >= config.window_seconds
+        ]
+        for chat_id in expired:
+            del self._windows[chat_id]
 
     def record_and_check(
         self,
@@ -116,6 +130,9 @@ class _RateLimitState:
         if not config.is_enabled():
             return True
 
+        if len(self._windows) >= _PRUNE_THRESHOLD:
+            self._prune_expired(now, config)
+
         window = self._windows.get(chat_id)
         if window is None:
             self._windows[chat_id] = _ChatWindow(window_start=now, count=1)
@@ -131,36 +148,6 @@ class _RateLimitState:
 
         window.count += 1
         return True
-
-    def clear(self) -> None:
-        self._windows.clear()
-
-    def advance_clock(self, now: float) -> None:
-        """Set the synthetic clock used by this state.
-
-        This exists so tests can control time without touching
-        ``time.monotonic`` directly.
-        """
-        self._now = now
-
-    def clear(self) -> None:
-        self._windows.clear()
-
-    def advance_clock(self, now: float) -> None:
-        """Set the synthetic clock used by this state.
-
-        This exists so tests can control time without touching
-        ``time.monotonic`` directly.
-        """
-        self._now = now
-
-    def advance_clock(self, now: float) -> None:
-        """Set the synthetic clock used by this state.
-
-        This exists so tests can control time without touching
-        ``time.monotonic`` directly.
-        """
-        self._now = now
 
 
 _rate_limit_state = _RateLimitState()
@@ -223,4 +210,4 @@ def reset_rate_limit_state() -> None:
     Provided mainly for testing and for hard reset scenarios. Normal
     operation never needs to call this.
     """
-    _rate_limit_state._windows.clear()
+    _rate_limit_state.clear()

@@ -103,7 +103,7 @@ from trader.paper.portfolio_risk import (
     trade_risk,
 )
 from trader.trade import build_trade
-from journal.journal import log_trade
+from journal.journal import journal_status, log_trade
 from alerts.manager import AlertManager, build_alert_manager
 from telegram_bot.analyze_reporting import (
     dispatch_entry_gate_alerts,
@@ -118,6 +118,7 @@ from trader.paper.analysis_service import (
 )
 from telegram_bot.auth import authorization_status
 from dashboard.report import format_report_message
+from dashboard.status import format_status_message
 from telegram_bot.settings_report import format_settings_message
 from telegram_bot.rate_limit import (
     build_rate_limit_config,
@@ -239,6 +240,30 @@ def _paper_pause_state() -> PauseState:
     broken control file blocks new entries instead of allowing them.
     """
     return read_pause_state(PAUSE_STATE_PATH)
+
+
+# The bot module owns the background monitor. It registers a callable
+# here at startup so handlers can report the monitor without importing
+# the bot layer (and without a circular import).
+_monitor_status_provider = None
+
+
+def bind_monitor_status_provider(provider) -> None:
+    """Register the callable that reports the paper monitor's state."""
+    global _monitor_status_provider
+    _monitor_status_provider = provider
+
+
+def _monitor_status() -> str:
+    """Report the monitor state, defaulting to disabled when unbound."""
+    provider = _monitor_status_provider
+    if provider is None:
+        return "disabled"
+    try:
+        return provider()
+    except Exception:
+        logger.warning("Monitor status provider failed.", exc_info=True)
+        return "unknown"
 
 
 def _get_paper_service() -> PaperTradingService:
@@ -507,6 +532,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "7 days, by symbol)\n"
         "/pause [reason] - Block new paper entries (positions stay open)\n"
         "/resume - Allow new paper entries again\n"
+        "/status - Show operational status (pause, monitor, journal)\n"
         "/settings - Show execution mode, limits, access and alerts"
     )
     await update.message.reply_text(message)
@@ -1128,6 +1154,33 @@ async def resume_command(
     await update.message.reply_text(
         "▶️ Paper trading resumed: new entries are allowed."
     )
+
+
+async def status_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Show operational status: pause, monitor, account and journal."""
+    if await _rate_limited(update):
+        return
+
+    service = _get_paper_service()
+    summary = service.summary()
+    message = format_status_message(
+        execution_mode=settings.EXECUTION_MODE,
+        paper_trading=settings.PAPER_TRADING,
+        guardian_mode=settings.GUARDIAN_MODE,
+        authorization=authorization_status(),
+        pause=_paper_pause_state(),
+        monitor_status=_monitor_status(),
+        monitor_interval=settings.PAPER_MONITOR_INTERVAL_SECONDS,
+        balance=summary.current_balance,
+        open_positions=len(service.open_positions()),
+        closed_trades=len(service.closed_positions()),
+        journal=journal_status(),
+        rate_limit_commands=_rate_limit_config.commands_per_window,
+        rate_limit_window=_rate_limit_config.window_seconds,
+    )
+    await update.message.reply_text(message)
 
 
 async def stats_command(
