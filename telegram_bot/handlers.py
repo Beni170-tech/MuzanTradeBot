@@ -4,7 +4,6 @@ All user-facing command logic lives here.
 """
 
 import logging
-import math
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -22,11 +21,14 @@ from strategy.parameters import (
 )
 from strategy.trading_policy import TradingPolicy
 from trader.paper.service import PaperTradingService
-from trader.paper.storage import load_account as storage_load_account
-from trader.paper.storage import save_account as storage_save_account
 from trader.paper.order import PaperOrder, PaperOrderStatus
 from trader.paper.order import paper_exit_status, paper_exit_date
 from trader.paper.rules import is_valid_exit_price
+from trader.paper.sizing import (
+    paper_mark_block,
+    read_paper_equity,
+    resolve_trading_policy,
+)
 from trader.paper.read_model import (
     CloseRequestError,
     CloseTargetStatus,
@@ -85,11 +87,7 @@ from trader.paper.lifecycle import (
     record_market_mark,
     valid_price,
 )
-from trader.paper.mark_freshness import (
-    MarksFreshnessResult,
-    check_marks_freshness,
-    max_mark_age_seconds,
-)
+from trader.paper.mark_freshness import MarksFreshnessResult
 from trader.paper.max_open_positions import MaxOpenPositionsManager
 from trader.paper.portfolio_risk import (
     PortfolioRiskManager,
@@ -135,6 +133,30 @@ _rate_limit_config = build_rate_limit_config(
 
 # Module-level paper service (lazy-loaded)
 _paper_service: PaperTradingService | None = None
+
+
+async def _rate_limited(update: Update) -> bool:
+    """Send the friendly rate-limit reply when this chat must wait.
+
+    The check and its reply are shared by every rate-limited command so
+    the message text stays in one place. ``check_rate_limit`` and the
+    configuration are read from this module at call time, preserving the
+    existing patch seams.
+
+    Args:
+        update: The incoming Telegram update.
+
+    Returns:
+        True when the request was rejected and the reply was sent, so the
+        handler returns without doing any other work.
+    """
+    if check_rate_limit(update.effective_chat.id, _rate_limit_config):
+        return False
+    await update.message.reply_text(
+        "⏳ Too many requests. Please wait a moment before trying again."
+    )
+    return True
+
 
 # Module-level alert manager (lazy-loaded, Sprint 9A)
 _alert_manager: AlertManager | None = None
@@ -213,27 +235,11 @@ def _get_paper_service() -> PaperTradingService:
 def _paper_equity_for_sizing() -> float:
     """Return the paper account equity used to size a new trade.
 
-    Guardian Mode sizes from the capital that is actually at risk, so
-    realized losses and unrealized results at recorded marks shrink or
-    grow the risk budget instead of every trade sizing from the static
-    configured balance.
-
-    A failure to read the account fails closed with 0.0: the risk manager
-    then rejects the trade (balance must be positive) rather than silently
-    sizing from a configured balance that no longer matches the account.
-
-    Returns:
-        The paper account equity, or 0.0 when it cannot be read.
+    Delegates to :func:`trader.paper.sizing.read_paper_equity`; the
+    service is resolved here, at call time, so patching
+    ``_get_paper_service`` on this module keeps working.
     """
-    try:
-        return float(_get_paper_service().summary().equity)
-    except Exception:
-        logger.warning(
-            "Could not read paper account equity for position sizing; "
-            "refusing to size this trade.",
-            exc_info=True,
-        )
-        return 0.0
+    return read_paper_equity(_get_paper_service)
 
 
 def _resolve_trading_policy(
@@ -241,31 +247,13 @@ def _resolve_trading_policy(
 ) -> TradingPolicy | None:
     """Resolve the validated policy that drives this trade's sizing.
 
-    Called as late as practical: after analysis, the fresh quote, and the
-    market-mark freshness gate. In paper mode, sizing uses the paper
-    account's current equity. When that equity cannot be read, or is not
-    positive, no policy can be built and ``None`` is returned so the
-    caller blocks the trade instead of falling back to a configured
-    balance that no longer matches the account. When paper trading is
-    disabled there is no paper account to read, so the configured balance
-    is used as before.
-
-    Args:
-        strategy: The exact strategy instance that produced this
-            decision's signal. It is carried unchanged by the policy.
-
-    Returns:
-        The TradingPolicy for this analysis request, or None when paper
-        equity is unusable.
+    Delegates to :func:`trader.paper.sizing.resolve_trading_policy`. The
+    live settings and this module's patchable equity reader are injected
+    at call time, so ``PAPER_TRADING`` and monkeypatched seams still
+    decide whether and how the account is read.
     """
-    if not settings.PAPER_TRADING:
-        return TradingPolicy.from_settings(settings, strategy=strategy)
-
-    equity = _paper_equity_for_sizing()
-    if not math.isfinite(equity) or equity <= 0:
-        return None
-    return TradingPolicy.from_settings(
-        settings, balance=equity, strategy=strategy
+    return resolve_trading_policy(
+        strategy, settings, _paper_equity_for_sizing
     )
 
 
@@ -310,36 +298,15 @@ def _quote_unavailable_message(analysis: dict) -> str:
 def _paper_mark_block() -> MarksFreshnessResult | None:
     """Return the freshness result that forbids sizing, or None.
 
-    Equity-based sizing values open positions at recorded market marks,
-    so every open position must have a valid, recent mark before a new
-    trade may be sized. A missing/invalid/stale mark (or unreadable
-    account state) blocks the trade; it never falls back to
-    ``ACCOUNT_BALANCE``, an entry price, or an old mark.
-
-    Returns:
-        None when sizing may proceed (including when paper trading is
-        disabled), otherwise the freshness result explaining the block.
+    Delegates to :func:`trader.paper.sizing.paper_mark_block` with the
+    live settings and the patchable service factory, so the gate order,
+    fail-closed behaviour and seam surface are unchanged.
     """
-    if not settings.PAPER_TRADING:
-        return None
-
-    max_age = max_mark_age_seconds(settings.PAPER_MONITOR_INTERVAL_SECONDS)
-    try:
-        positions = _get_paper_service().open_positions()
-    except Exception:
-        logger.warning(
-            "Could not read open paper positions for mark freshness; "
-            "refusing to size this trade.",
-            exc_info=True,
-        )
-        return MarksFreshnessResult(
-            fresh=False,
-            reason="paper account state could not be read",
-            max_age_seconds=max_age,
-        )
-
-    result = check_marks_freshness(positions, max_age_seconds=max_age)
-    return None if result.fresh else result
+    return paper_mark_block(
+        paper_trading=settings.PAPER_TRADING,
+        monitor_interval_seconds=settings.PAPER_MONITOR_INTERVAL_SECONDS,
+        service_factory=_get_paper_service,
+    )
 
 
 def _stale_mark_message(analysis: dict, block: MarksFreshnessResult) -> str:
@@ -480,10 +447,7 @@ def _close_paper_position_for(
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start command."""
-    if not check_rate_limit(update.effective_chat.id, _rate_limit_config):
-        await update.message.reply_text(
-            "⏳ Too many requests. Please wait a moment before trying again."
-        )
+    if await _rate_limited(update):
         return
 
     paper_status = "Enabled" if settings.PAPER_TRADING else "Disabled"
@@ -501,10 +465,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /help command."""
-    if not check_rate_limit(update.effective_chat.id, _rate_limit_config):
-        await update.message.reply_text(
-            "⏳ Too many requests. Please wait a moment before trying again."
-        )
+    if await _rate_limited(update):
         return
 
     message = (
@@ -527,10 +488,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /ping command."""
-    if not check_rate_limit(update.effective_chat.id, _rate_limit_config):
-        await update.message.reply_text(
-            "⏳ Too many requests. Please wait a moment before trying again."
-        )
+    if await _rate_limited(update):
         return
 
     await update.message.reply_text("🏓 Pong!")
@@ -538,10 +496,7 @@ async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def version(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /version command."""
-    if not check_rate_limit(update.effective_chat.id, _rate_limit_config):
-        await update.message.reply_text(
-            "⏳ Too many requests. Please wait a moment before trying again."
-        )
+    if await _rate_limited(update):
         return
 
     from main import __version__
@@ -672,10 +627,7 @@ def _format_analysis_message(run: AnalysisRun) -> str:
 
 async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Analyze a cryptocurrency through the full Guardian Mode pipeline."""
-    if not check_rate_limit(update.effective_chat.id, _rate_limit_config):
-        await update.message.reply_text(
-            "⏳ Too many requests. Please wait a moment before trying again."
-        )
+    if await _rate_limited(update):
         return
 
     if context.args:
@@ -731,10 +683,7 @@ async def settings_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """Show operational settings without exposing credentials."""
-    if not check_rate_limit(update.effective_chat.id, _rate_limit_config):
-        await update.message.reply_text(
-            "⏳ Too many requests. Please wait a moment before trying again."
-        )
+    if await _rate_limited(update):
         return
 
     message = format_settings_message(
@@ -760,10 +709,7 @@ async def settings_command(
 
 async def paper_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show paper account summary."""
-    if not check_rate_limit(update.effective_chat.id, _rate_limit_config):
-        await update.message.reply_text(
-            "⏳ Too many requests. Please wait a moment before trying again."
-        )
+    if await _rate_limited(update):
         return
 
     view = account_view(_get_paper_service())
@@ -807,10 +753,7 @@ async def positions_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """Show all open paper positions."""
-    if not check_rate_limit(update.effective_chat.id, _rate_limit_config):
-        await update.message.reply_text(
-            "⏳ Too many requests. Please wait a moment before trying again."
-        )
+    if await _rate_limited(update):
         return
 
     open_positions = open_positions_view(_get_paper_service())
@@ -835,10 +778,7 @@ async def history_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """Show recently closed paper trades."""
-    if not check_rate_limit(update.effective_chat.id, _rate_limit_config):
-        await update.message.reply_text(
-            "⏳ Too many requests. Please wait a moment before trying again."
-        )
+    if await _rate_limited(update):
         return
 
     view = history_view(_get_paper_service())
@@ -890,10 +830,7 @@ async def close_command(
     symbol, nothing is closed until the exact order id is supplied, so a
     manual close can never hit the wrong position or close them all.
     """
-    if not check_rate_limit(update.effective_chat.id, _rate_limit_config):
-        await update.message.reply_text(
-            "⏳ Too many requests. Please wait a moment before trying again."
-        )
+    if await _rate_limited(update):
         return
 
     # Everything up to the service lookup stays pure argument work, so a
