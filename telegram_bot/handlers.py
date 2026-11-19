@@ -1009,32 +1009,49 @@ async def close_command(
     )
 
     if result is None:
+        # Rejected without mutation: either the position was no longer
+        # open by the time the close ran, or the pre-flight state write
+        # failed. Neither path changes the balance or any position.
         await update.message.reply_text(
-            f"❌ Could not close {symbol} position "
-            f"'{target.order_id}' — nothing was closed."
+            "❌ Close Rejected — nothing was closed or changed.\n\n"
+            f"Symbol: {symbol}\n"
+            f"Order ID: {target.order_id}\n\n"
+            "The position is no longer open, or the paper state file "
+            "could not be written.\n"
+            "No balance change was applied. Check /status and the bot "
+            "logs before retrying."
         )
         return
 
     order = result.order
     new_balance = result.new_balance
 
+    if result.persisted:
+        heading = "✅ Position Closed and Saved"
+        status_note = ""
+    else:
+        # The close did happen in memory, but disk still holds the old
+        # account. Never present this as a completed saved close.
+        heading = "⚠️ Close Applied in Memory — NOT Persisted"
+        status_note = (
+            "\n\n⚠️ The close could not be saved to disk.\n"
+            "   The account in memory is updated, but a restart restores "
+            "the\n"
+            "   last saved state, which may still contain this position.\n"
+            "   Check /status and the bot logs. Retrying now is rejected "
+            "because\n"
+            "   the position is already closed in memory."
+        )
+
     message = (
-        f"✅ Position Closed\n\n"
+        f"{heading}\n\n"
         f"Symbol: {order.symbol}\n"
         f"Order ID: {order.order_id}\n"
         f"Side: {order.side.value}\n"
         f"Exit Price: ${order.exit_price:.2f}\n"
         f"Realized PnL: ${order.realized_pnl:.2f} ({_format_pnl_label(order)})\n"
         f"Updated Balance: ${new_balance:.2f}"
-    )
-    if not result.persisted:
-        message += (
-            "\n\n⚠️ The close could not be saved to disk.\n"
-            "   The account in memory is updated, but a restart before the "
-            "next\n"
-            "   successful save may restore this position.\n"
-            "   Check /status and the bot logs."
-        )
+    ) + status_note
     await update.message.reply_text(message)
 
 
