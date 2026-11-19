@@ -36,6 +36,7 @@ class AnalysisStatus(str, Enum):
     SIZING_UNAVAILABLE = "sizing_unavailable"
     RISK_REJECTED = "risk_rejected"
     APPROVED = "approved"
+    PAUSED = "paused"
     GATE_REJECTED = "gate_rejected"
     PAPER_PLACED = "paper_placed"
     PAPER_NOT_PLACED = "paper_not_placed"
@@ -45,6 +46,7 @@ class AnalysisStatus(str, Enum):
 #: Statuses reached inside the paper-trading block.
 PAPER_STATUSES = frozenset(
     {
+        AnalysisStatus.PAUSED,
         AnalysisStatus.GATE_REJECTED,
         AnalysisStatus.PAPER_PLACED,
         AnalysisStatus.PAPER_NOT_PLACED,
@@ -100,6 +102,7 @@ async def run_analysis_pipeline(
     build_trade: Callable[..., Any],
     log_trade: Callable[..., Any],
     paper_service_factory: Callable[[], Any],
+    paper_pause_state: Callable[[], Any],
     before_analysis_paper_check: Callable[[Any, str, float], Any | None],
     apply_trailing_stop: Callable[
         [Any, str, float], tuple[bool, float | None, float | None] | None
@@ -228,6 +231,28 @@ async def run_analysis_pipeline(
             # Sprint 9A: push a trailing-stop alert (never raises).
             await dispatch_alert(
                 "trailing_stop_updated", trade.symbol, old_stop, new_stop
+            )
+
+        # Global pause control (Milestone M-C): stop new entries while
+        # the operator has paused paper trading. This runs after the
+        # SL/TP closure check and the trailing stop, so existing
+        # positions are still protected, and before any entry gate or
+        # placement. Unreadable control state reports as paused, so a
+        # control-file problem can never enable a new entry.
+        pause_state = paper_pause_state()
+        if pause_state.paused:
+            logger.warning(
+                "Paper trading paused; new %s entry blocked (%s).",
+                trade.symbol,
+                pause_state.reason or "no reason given",
+            )
+            return AnalysisRun(
+                AnalysisStatus.PAUSED,
+                coin,
+                analysis=result,
+                trade=trade,
+                sltp_closed=sltp_closed,
+                trail_result=trail_result,
             )
 
         # Portfolio safety gates (Sprints 7A-8B): run after the

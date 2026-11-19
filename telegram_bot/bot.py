@@ -21,7 +21,9 @@ from telegram_bot.handlers import (
     positions_command,
     history_command,
     close_command,
+    pause_command,
     report_command,
+    resume_command,
     stats_command,
     settings_command,
 )
@@ -57,6 +59,8 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("close", close_command))
     app.add_handler(CommandHandler("stats", stats_command))
     app.add_handler(CommandHandler("report", report_command))
+    app.add_handler(CommandHandler("pause", pause_command))
+    app.add_handler(CommandHandler("resume", resume_command))
     app.add_handler(CommandHandler("settings", settings_command))
 
     logger.info("Telegram application built successfully.")

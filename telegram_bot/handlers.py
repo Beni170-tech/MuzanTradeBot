@@ -88,6 +88,13 @@ from trader.paper.lifecycle import (
     record_market_mark,
     valid_price,
 )
+from trader.paper.pause import (
+    DEFAULT_PAUSE_STATE_PATH,
+    PauseState,
+    clear_pause,
+    read_pause_state,
+    request_pause,
+)
 from trader.paper.mark_freshness import MarksFreshnessResult
 from trader.paper.max_open_positions import MaxOpenPositionsManager
 from trader.paper.portfolio_risk import (
@@ -123,6 +130,10 @@ from telegram_bot.rate_limit import (
 # attribute keeps redirecting handler and monitor writes alike.
 PAPER_STATE_PATH = DEFAULT_PAPER_STATE_PATH
 bind_state_path(lambda: PAPER_STATE_PATH)
+
+# Pause control path. Read at call time, so patching this attribute
+# redirects the pause gate and the /pause and /resume commands.
+PAUSE_STATE_PATH = DEFAULT_PAUSE_STATE_PATH
 
 # Module-level rate-limit configuration. This is built once at import time
 # from settings, but the helper uses the live settings values so tests can
@@ -219,6 +230,15 @@ async def _dispatch_alert(event: str, *args) -> None:
             event,
             exc_info=True,
         )
+
+
+def _paper_pause_state() -> PauseState:
+    """Read the global paper pause control from this module's path.
+
+    Never raises: unreadable control state comes back as paused, so a
+    broken control file blocks new entries instead of allowing them.
+    """
+    return read_pause_state(PAUSE_STATE_PATH)
 
 
 def _get_paper_service() -> PaperTradingService:
@@ -485,6 +505,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/stats - Show paper trading performance dashboard\n"
         "/report - Show the paper performance report (all time, today, "
         "7 days, by symbol)\n"
+        "/pause [reason] - Block new paper entries (positions stay open)\n"
+        "/resume - Allow new paper entries again\n"
         "/settings - Show execution mode, limits, access and alerts"
     )
     await update.message.reply_text(message)
@@ -605,6 +627,13 @@ def _format_analysis_message(run: AnalysisRun) -> str:
 
     if run.status is AnalysisStatus.GATE_REJECTED:
         message += _entry_gate_rejection_message(trade, run.gate_outcome)
+    elif run.status is AnalysisStatus.PAUSED:
+        message += (
+            "\n\n⏸ Paper Trading Paused\n"
+            "   No new paper entry was placed.\n"
+            "   Existing positions remain monitored.\n"
+            "   Use /resume to re-enable new entries."
+        )
     elif run.status is AnalysisStatus.PAPER_PLACED:
         paper_order = run.paper_order
         message += (
@@ -659,6 +688,7 @@ async def analyze(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         validate_trade=validate_trade,
         build_trade=build_trade,
         log_trade=log_trade,
+        paper_pause_state=_paper_pause_state,
         paper_service_factory=_get_paper_service,
         before_analysis_paper_check=_before_analysis_paper_check,
         apply_trailing_stop=_apply_trailing_stop,
@@ -1052,6 +1082,52 @@ async def report_command(
 
     view = report_view(_get_paper_service())
     await update.message.reply_text(format_report_message(view))
+
+
+async def pause_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Block new paper entries; existing positions stay managed."""
+    if await _rate_limited(update):
+        return
+
+    reason = " ".join(context.args) if context.args else None
+    state = request_pause(reason, PAUSE_STATE_PATH)
+    if state is None:
+        await update.message.reply_text(
+            "❌ Could not save the pause state.\n"
+            "   Paper trading is unchanged; check the bot logs and retry."
+        )
+        return
+
+    message = "⏸ Paper trading paused: new entries are blocked."
+    if state.reason:
+        message += f"\nReason: {state.reason}"
+    message += (
+        "\nExisting positions are still monitored; SL/TP, trailing "
+        "stops and /close keep working."
+    )
+    await update.message.reply_text(message)
+
+
+async def resume_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Allow new paper entries again."""
+    if await _rate_limited(update):
+        return
+
+    state = clear_pause(PAUSE_STATE_PATH)
+    if state is None:
+        await update.message.reply_text(
+            "❌ Could not save the resume state.\n"
+            "   Paper trading is unchanged; check the bot logs and retry."
+        )
+        return
+
+    await update.message.reply_text(
+        "▶️ Paper trading resumed: new entries are allowed."
+    )
 
 
 async def stats_command(
