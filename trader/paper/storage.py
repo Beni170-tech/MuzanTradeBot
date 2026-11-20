@@ -9,6 +9,7 @@ produces fully functional PaperAccount and PaperOrder objects on load.
 
 from __future__ import annotations
 
+import errno
 import json
 import math
 import os
@@ -359,13 +360,81 @@ def _dict_to_account(data: dict[str, Any]) -> PaperAccount:
     )
 
 
+#: Errno values that mean "this platform or filesystem cannot fsync a
+#: directory" rather than "the directory could not be made durable".
+_UNSUPPORTED_DIRECTORY_FSYNC_ERRNOS = frozenset(
+    code
+    for code in (
+        errno.EINVAL,
+        errno.EBADF,
+        errno.ENOSYS,
+        errno.EACCES,
+        errno.EPERM,
+        getattr(errno, "ENOTSUP", None),
+        getattr(errno, "EOPNOTSUPP", None),
+    )
+    if code is not None
+)
+
+
+def _directory_fsync_is_supported() -> bool:
+    """Return whether a directory can be opened and fsynced here.
+
+    Windows cannot open a directory as a file descriptor, and some
+    Python builds lack ``os.O_DIRECTORY``; on those platforms the
+    directory fsync is skipped rather than attempted and failed.
+    """
+    return os.name != "nt" and hasattr(os, "O_DIRECTORY")
+
+
+def _sync_directory(directory: Path) -> None:
+    """Make a completed rename inside ``directory`` durable.
+
+    ``os.replace()`` is atomic, but the rename lives in the parent
+    directory's metadata, so without an fsync of that directory a crash
+    can still lose the newly written file even though its contents were
+    fsynced.
+
+    Platforms and filesystems that cannot fsync a directory (Windows,
+    network or FUSE mounts, some container filesystems) report a known
+    unsupported errno and are skipped explicitly. Any other failure is
+    raised, so a durability problem is never silently reported as a
+    successful save.
+
+    Raises:
+        OSError: If the directory could be opened but could not be
+            fsynced for a reason other than lack of support.
+    """
+    if not _directory_fsync_is_supported():
+        return
+
+    flags = os.O_RDONLY | os.O_DIRECTORY
+    try:
+        dir_fd = os.open(directory, flags)
+    except OSError as exc:
+        if exc.errno in _UNSUPPORTED_DIRECTORY_FSYNC_ERRNOS:
+            return
+        raise
+
+    try:
+        os.fsync(dir_fd)
+    except OSError as exc:
+        if exc.errno in _UNSUPPORTED_DIRECTORY_FSYNC_ERRNOS:
+            return
+        raise
+    finally:
+        os.close(dir_fd)
+
+
 def _atomic_write_text(path: Path, payload: str) -> None:
     """Atomically replace ``path`` with ``payload``.
 
     The payload is written to a temporary file in the same directory,
     flushed and fsynced, then moved into place with ``os.replace()``.
-    If writing or replacement fails, the existing file is left untouched
-    and the temporary file is removed.
+    The parent directory is fsynced afterwards so the rename itself is
+    durable, not just the file contents. If writing or replacement
+    fails, the existing file is left untouched and the temporary file is
+    removed.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = -1
@@ -383,6 +452,7 @@ def _atomic_write_text(path: Path, payload: str) -> None:
             os.fsync(handle.fileno())
         os.replace(temp_path, path)
         temp_path = None
+        _sync_directory(path.parent)
     finally:
         if fd != -1:
             os.close(fd)

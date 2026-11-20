@@ -1,7 +1,10 @@
 """Regression tests for validation of saved paper trading data (D2)."""
 
+import errno
 import json
 import math
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -551,6 +554,120 @@ def test_save_preserves_previous_data_on_replacement_failure(
         saver(path)
 
     assert path.read_text(encoding="utf-8") == "previous valid data"
+    assert _temp_files(tmp_path) == []
+
+
+def _accepted_account() -> PaperAccount:
+    """Return a small valid account for atomic-write tests."""
+    return PaperAccount(initial_balance=1000.0, current_balance=900.0)
+
+
+def _is_directory_fd(fd: int) -> bool:
+    """Return whether ``fd`` refers to a directory."""
+    return stat.S_ISDIR(os.fstat(fd).st_mode)
+
+
+def test_save_account_fsyncs_parent_directory_after_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "account.json"
+    events: list[str] = []
+    real_replace = storage.os.replace
+    real_fsync = storage.os.fsync
+
+    def tracked_replace(src: str | Path, dst: str | Path) -> None:
+        events.append("replace")
+        real_replace(src, dst)
+
+    def tracked_fsync(fd: int) -> None:
+        events.append(
+            "directory-fsync" if _is_directory_fd(fd) else "file-fsync"
+        )
+        real_fsync(fd)
+
+    monkeypatch.setattr(storage.os, "replace", tracked_replace)
+    monkeypatch.setattr(storage.os, "fsync", tracked_fsync)
+
+    save_account(_accepted_account(), path)
+
+    # The file contents are fsynced first, then the rename happens, and
+    # only then is the parent directory fsynced to persist that rename.
+    assert events == ["file-fsync", "replace", "directory-fsync"]
+    assert load_account(path).current_balance == 900.0
+    assert _temp_files(tmp_path) == []
+
+
+def test_save_account_skips_directory_fsync_when_unsupported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "account.json"
+    fsynced_directories: list[bool] = []
+    real_fsync = storage.os.fsync
+
+    def tracking_fsync(fd: int) -> None:
+        fsynced_directories.append(_is_directory_fd(fd))
+        real_fsync(fd)
+
+    monkeypatch.setattr(
+        storage, "_directory_fsync_is_supported", lambda: False
+    )
+    monkeypatch.setattr(storage.os, "fsync", tracking_fsync)
+
+    save_account(_accepted_account(), path)
+
+    # Only the temporary file is fsynced; the directory sync is skipped.
+    assert fsynced_directories == [False]
+    assert load_account(path).current_balance == 900.0
+
+
+def _fail_directory_fsync(
+    monkeypatch: pytest.MonkeyPatch, error: OSError
+) -> None:
+    """Make fsync fail only for directory descriptors."""
+    real_fsync = storage.os.fsync
+
+    def failing_fsync(fd: int) -> None:
+        if _is_directory_fd(fd):
+            raise error
+        real_fsync(fd)
+
+    monkeypatch.setattr(storage.os, "fsync", failing_fsync)
+
+
+def test_save_account_tolerates_unsupported_directory_fsync_errno(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "account.json"
+    _fail_directory_fsync(
+        monkeypatch,
+        OSError(errno.EINVAL, "directory fsync not supported here"),
+    )
+
+    save_account(_accepted_account(), path)
+
+    # An unsupported filesystem must not turn a completed save into an
+    # error: the rename already succeeded and the data is in place.
+    assert load_account(path).current_balance == 900.0
+    assert _temp_files(tmp_path) == []
+
+
+def test_save_account_reports_real_directory_fsync_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "account.json"
+    _fail_directory_fsync(
+        monkeypatch,
+        OSError(errno.EIO, "simulated directory fsync failure"),
+    )
+
+    # A genuine durability failure is raised, never reported as success.
+    with pytest.raises(OSError, match="simulated directory fsync failure"):
+        save_account(_accepted_account(), path)
+
+    # The rename already happened before the directory fsync, so the new
+    # payload is on disk; the raised error records that its durability
+    # could not be confirmed. No temporary file is leaked.
+    assert load_account(path).current_balance == 900.0
     assert _temp_files(tmp_path) == []
 
 
