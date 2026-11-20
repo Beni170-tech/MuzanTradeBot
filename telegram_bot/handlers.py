@@ -1250,6 +1250,11 @@ async def stats_command(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """Show paper trading performance dashboard."""
+    # Rate-limit before any service lookup so a throttled request never
+    # loads the account or reads its data.
+    if await _rate_limited(update):
+        return
+
     view = stats_view(
         _get_paper_service(),
         portfolio_risk_limit=settings.PORTFOLIO_RISK_LIMIT,
