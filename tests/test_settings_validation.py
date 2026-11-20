@@ -28,7 +28,19 @@ class TestValidateSettings:
     def test_defaults_have_no_errors(self):
         assert _errors(validate_settings()) == []
 
-    def test_disabled_limits_are_visible_warnings(self):
+    def test_disabled_limits_are_visible_warnings(self, monkeypatch):
+        # Limits are enabled by default; explicitly disable them so this
+        # test keeps checking the disabled-limit warnings.
+        for name in (
+            "PORTFOLIO_RISK_LIMIT",
+            "PORTFOLIO_EXPOSURE_LIMIT",
+            "PORTFOLIO_DAILY_LOSS_LIMIT",
+            "PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL",
+            "PORTFOLIO_MAX_POSITIONS_PER_SYMBOL",
+            "PORTFOLIO_MAX_OPEN_POSITIONS",
+        ):
+            monkeypatch.setattr(settings, name, 0)
+
         issues = _issues_by_name(validate_settings())
         for name in (
             "PORTFOLIO_RISK_LIMIT",
@@ -40,6 +52,8 @@ class TestValidateSettings:
         ):
             assert issues[name].severity == "warning"
             assert "disabled (0)" in issues[name].message
+        assert issues["PORTFOLIO_LIMITS"].severity == "warning"
+        assert "no portfolio backstops" in issues["PORTFOLIO_LIMITS"].message
 
     @pytest.mark.parametrize(
         "name",
@@ -144,6 +158,17 @@ class TestStartupGate:
         self, monkeypatch, capsys
     ):
         monkeypatch.setattr(settings, "TELEGRAM_BOT_TOKEN", "")
+        # Limits are enabled by default; disable them explicitly so this
+        # test still checks that a disabled limit is reported at startup.
+        for name in (
+            "PORTFOLIO_RISK_LIMIT",
+            "PORTFOLIO_EXPOSURE_LIMIT",
+            "PORTFOLIO_DAILY_LOSS_LIMIT",
+            "PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL",
+            "PORTFOLIO_MAX_POSITIONS_PER_SYMBOL",
+            "PORTFOLIO_MAX_OPEN_POSITIONS",
+        ):
+            monkeypatch.setattr(settings, name, 0)
         # Other execution-mode tests mutate the class attribute directly;
         # pin the startup mode so this test never depends on that state.
         monkeypatch.setattr(Settings, "EXECUTION_MODE", "PAPER")

@@ -61,6 +61,12 @@ state but never a token, API key or authorized id.
 | `RISK_PERCENT` | `2.0` | Percent of current paper equity risked per trade. |
 | `STOP_LOSS_PERCENT` | `2.0` | Stop-loss distance from the entry price. |
 | `TAKE_PROFIT_PERCENT` | `4.0` | Take-profit distance from the entry price. |
+| `PORTFOLIO_RISK_LIMIT` | 6% of balance | Maximum total open risk. |
+| `PORTFOLIO_EXPOSURE_LIMIT` | 300% of balance | Maximum total notional exposure. |
+| `PORTFOLIO_DAILY_LOSS_LIMIT` | 3% of balance | Maximum net realized daily loss. |
+| `PORTFOLIO_MAX_OPEN_POSITIONS` | `3` | Maximum open positions. |
+| `PORTFOLIO_MAX_POSITIONS_PER_SYMBOL` | `1` | Maximum open positions per symbol. |
+| `PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL` | 200% of balance | Maximum notional exposure per symbol. |
 | `PAPER_MONITOR_INTERVAL_SECONDS` | `45` | Background monitor cycle; `<= 0` disables it. |
 | `TELEGRAM_COMMAND_RATE_LIMIT_PER_WINDOW` | `12` | Commands per chat per window; `<= 0` disables. |
 | `TELEGRAM_COMMAND_RATE_WINDOW_SECONDS` | `10` | Rate-limit window length; `<= 0` disables. |
@@ -70,8 +76,10 @@ state but never a token, API key or authorized id.
 Portfolio limits (`PORTFOLIO_RISK_LIMIT`,
 `PORTFOLIO_EXPOSURE_LIMIT`, `PORTFOLIO_DAILY_LOSS_LIMIT`,
 `PORTFOLIO_MAX_OPEN_POSITIONS`, `PORTFOLIO_MAX_POSITIONS_PER_SYMBOL`,
-`PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL`) all default to `0`, which disables
-that limit. See [Guardian Limits](#guardian-limits-and-entry-gates).
+`PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL`) are enabled by default with
+conservative values derived from `ACCOUNT_BALANCE`; set one to `0` to
+disable that gate explicitly. See
+[Guardian Limits](#guardian-limits-and-entry-gates).
 Exchange API keys (`BINANCE_*`, `BYBIT_*`, `KRAKEN_*`) may be set for
 future use; no live backend consumes them.
 
@@ -154,11 +162,44 @@ rejection:
 | `PORTFOLIO_MAX_POSITIONS_PER_SYMBOL` | Maximum open positions on one symbol. |
 | `PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL` | Maximum notional exposure on one symbol. |
 
-A limit `<= 0` disables that gate entirely, so it performs no account
-reads. A negative limit is a configuration error and blocks startup.
+Limits are configured by environment variable and follow one rule:
+
+- **Unset or blank** uses the conservative default shown below. Defaults
+  scale with `ACCOUNT_BALANCE` (default 1000), so a smaller account gets
+  proportionally smaller dollar limits.
+- **An explicit `0`** disables that gate entirely, so it performs no
+  account reads.
+- **A negative, non-finite or non-numeric value** is a configuration
+  error that names the variable and blocks startup. A mistyped limit
+  never silently falls back to a default or to disabled.
+
+| Limit | Default |
+| --- | --- |
+| `PORTFOLIO_RISK_LIMIT` | 6% of `ACCOUNT_BALANCE` |
+| `PORTFOLIO_EXPOSURE_LIMIT` | 300% of `ACCOUNT_BALANCE` |
+| `PORTFOLIO_DAILY_LOSS_LIMIT` | 3% of `ACCOUNT_BALANCE` |
+| `PORTFOLIO_MAX_OPEN_POSITIONS` | 3 |
+| `PORTFOLIO_MAX_POSITIONS_PER_SYMBOL` | 1 |
+| `PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL` | 200% of `ACCOUNT_BALANCE` |
+
+The exposure defaults leave room for the position counts they accompany:
+with the default 2% risk and 2% stop, one trade risks about 2% of equity
+and uses about its full value as notional.
+
 Stop-loss and take-profit levels are mandatory on every paper trade, and
 a disabled or stale market mark blocks new sizing rather than falling
 back to an entry price or the configured balance.
+
+### Migrating an existing `.env`
+
+An explicit value in `.env` always wins. Configurations that already set
+a limit to `0` keep that gate disabled after upgrading; only variables
+that are missing or blank change behaviour and pick up the conservative
+default. Run `/settings` after restarting: it reports each limit and how
+many of the six backstops are enabled.
+
+Startup also prints a summary warning when all six limits are disabled,
+so an all-off Guardian posture is visible rather than silent.
 
 ## Pausing and Resuming
 

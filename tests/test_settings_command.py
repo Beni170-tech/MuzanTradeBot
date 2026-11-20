@@ -60,7 +60,8 @@ class TestSettingsReport:
             "Max Positions per Symbol",
             "Max Exposure per Symbol",
         ):
-            assert f"{label}: disabled" in message
+            assert f"{label}: disabled (0)" in message
+        assert "Backstops: 0 of 6 enabled" in message
 
     def test_configured_limits_are_formatted(self):
         message = _formatted(
@@ -77,6 +78,7 @@ class TestSettingsReport:
         assert "Max Open Positions: 3" in message
         assert "Max Positions per Symbol: 2" in message
         assert "Max Exposure per Symbol: $1,500.00" in message
+        assert "Backstops: 6 of 6 enabled" in message
 
     def test_authorization_status_is_shown(self):
         message = _formatted(authorization_status="2 authorized ID(s)")

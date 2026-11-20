@@ -18,7 +18,7 @@ from typing import Mapping
 def _format_limit(value: float | int) -> str:
     """Format one limit, making the disabled state explicit."""
     if value <= 0:
-        return "disabled"
+        return "disabled (0)"
     if isinstance(value, int):
         return str(value)
     return f"{value:,.2f}"
@@ -27,7 +27,7 @@ def _format_limit(value: float | int) -> str:
 def _format_money_limit(value: float) -> str:
     """Format a dollar limit, making the disabled state explicit."""
     if value <= 0:
-        return "disabled"
+        return "disabled (0)"
     return f"${value:,.2f}"
 
 
@@ -75,6 +75,19 @@ def format_settings_message(
     else:
         chat_status = "Not configured (alerts will not be sent)"
 
+    enabled_limits = sum(
+        1
+        for value in (
+            portfolio_risk_limit,
+            portfolio_exposure_limit,
+            daily_loss_limit,
+            max_open_positions,
+            max_positions_per_symbol,
+            max_exposure_per_symbol,
+        )
+        if value > 0
+    )
+
     return (
         "⚙️ Bot Settings\n\n"
         "Execution:\n"
@@ -82,6 +95,7 @@ def format_settings_message(
         f"  Paper Trading: {paper_status}\n"
         f"  Guardian Mode: {guardian_status}\n\n"
         "Portfolio Limits:\n"
+        f"  Backstops: {enabled_limits} of 6 enabled\n"
         "  Portfolio Risk Limit: "
         f"{_format_money_limit(portfolio_risk_limit)}\n"
         "  Portfolio Exposure Limit: "

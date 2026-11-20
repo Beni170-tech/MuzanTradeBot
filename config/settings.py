@@ -13,26 +13,84 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
 
 
-def _env_float(name: str, default: float) -> float:
-    """Read a float from the environment, falling back to ``default`` when
-    the variable is missing or not a valid number. Invalid configuration
-    must never crash the bot or, worse, trade with corrupted numbers."""
-    raw = os.getenv(name, "")
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return default
+#: Environment variables that could not be parsed. The variable name is
+#: recorded rather than raised: importing the module must stay safe, and
+#: ``validate_settings`` turns each entry into a startup error that names
+#: the variable.
+_INVALID_ENV_VALUES: dict[str, str] = {}
+
+# Conservative portfolio-limit defaults, used only when the matching
+# environment variable is unset or blank. They are derived from
+# ACCOUNT_BALANCE so a smaller paper account gets proportionally smaller
+# dollar limits. An explicit "0" still disables a limit.
+_DEFAULT_PORTFOLIO_RISK_PERCENT = 6.0
+_DEFAULT_PORTFOLIO_DAILY_LOSS_PERCENT = 3.0
+# One default-sized trade risks 2% and uses about 100% of equity as
+# notional, so the exposure defaults must leave room for the position
+# count they accompany (per-symbol 1, portfolio 3).
+_DEFAULT_PORTFOLIO_EXPOSURE_PERCENT = 300.0
+_DEFAULT_PORTFOLIO_SYMBOL_EXPOSURE_PERCENT = 200.0
+_DEFAULT_PORTFOLIO_MAX_OPEN_POSITIONS = 3
+_DEFAULT_PORTFOLIO_MAX_POSITIONS_PER_SYMBOL = 1
 
 
-def _env_int(name: str, default: int) -> int:
-    """Read an int from the environment, falling back to ``default`` when
-    the variable is missing or not a valid number. Invalid configuration
-    must never crash the bot or, worse, trade with corrupted numbers."""
-    raw = os.getenv(name, "")
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
+def _raw_env(name: str) -> str | None:
+    """Return the stripped environment value, or None when unset/blank.
+
+    A blank value (``VAR=`` in ``.env``) is treated as unset so it falls
+    back to the conservative default instead of an accidental zero.
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return None
+    return raw.strip()
+
+
+def _record_invalid(name: str, reason: str) -> None:
+    """Remember an unparseable environment value for startup validation."""
+    _INVALID_ENV_VALUES.setdefault(name, reason)
+
+
+def _env_float(name: str, default: float, *, strict: bool = False) -> float:
+    """Read a float from the environment, falling back to ``default``.
+
+    With ``strict=True`` an unusable value is recorded so startup
+    validation can block the bot and name the variable. Without it the
+    old lenient fallback is preserved for settings that are not risk
+    limits.
+    """
+    raw = _raw_env(name)
+    if raw is None:
         return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        if strict:
+            _record_invalid(name, "must be a valid number")
+        return default
+    if strict and not math.isfinite(value):
+        _record_invalid(name, "must be a finite number")
+    return value
+
+
+def _env_int(name: str, default: int, *, strict: bool = False) -> int:
+    """Read an int from the environment, falling back to ``default``.
+
+    With ``strict=True`` an unusable value is recorded so startup
+    validation can block the bot and name the variable. Without it the
+    old lenient fallback is preserved for settings that are not risk
+    limits.
+    """
+    raw = _raw_env(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        if strict:
+            _record_invalid(name, "must be a whole number")
+        return default
+    return value
 
 
 class Settings:
@@ -79,26 +137,43 @@ class Settings:
 
     # Portfolio Risk Manager (Sprint 7A)
     # Maximum total dollar risk across all open paper positions.
-    # When <= 0, no portfolio risk limit is enforced.
-    PORTFOLIO_RISK_LIMIT: float = _env_float("PORTFOLIO_RISK_LIMIT", 0.0)
+    # Unset/blank defaults to 6% of ACCOUNT_BALANCE; an explicit 0
+    # disables the gate and a malformed value blocks startup.
+    PORTFOLIO_RISK_LIMIT: float = _env_float(
+        "PORTFOLIO_RISK_LIMIT",
+        round(ACCOUNT_BALANCE * _DEFAULT_PORTFOLIO_RISK_PERCENT / 100, 2),
+        strict=True,
+    )
 
     # Portfolio Exposure Limit (Sprint 7B)
     # Maximum total notional exposure (entry_price * quantity) across all
-    # open paper positions. When <= 0, no exposure limit is enforced.
-    PORTFOLIO_EXPOSURE_LIMIT: float = _env_float("PORTFOLIO_EXPOSURE_LIMIT", 0.0)
+    # open paper positions. Unset/blank defaults to 300% of
+    # ACCOUNT_BALANCE; an explicit 0 disables the gate.
+    PORTFOLIO_EXPOSURE_LIMIT: float = _env_float(
+        "PORTFOLIO_EXPOSURE_LIMIT",
+        round(ACCOUNT_BALANCE * _DEFAULT_PORTFOLIO_EXPOSURE_PERCENT / 100, 2),
+        strict=True,
+    )
 
     # Correlation Risk Manager (Sprint 7C)
     # Maximum number of open paper positions allowed on a single symbol.
-    # When <= 0, the per-symbol position-count rule is disabled.
+    # Unset/blank defaults to 1; an explicit 0 disables the rule.
     PORTFOLIO_MAX_POSITIONS_PER_SYMBOL: int = _env_int(
-        "PORTFOLIO_MAX_POSITIONS_PER_SYMBOL", 0
+        "PORTFOLIO_MAX_POSITIONS_PER_SYMBOL",
+        _DEFAULT_PORTFOLIO_MAX_POSITIONS_PER_SYMBOL,
+        strict=True,
     )
 
     # Maximum total notional exposure (entry_price * quantity) allowed on a
-    # single symbol across all open paper positions. When <= 0, the
-    # per-symbol exposure rule is disabled.
+    # single symbol across all open paper positions. Unset/blank defaults
+    # to 200% of ACCOUNT_BALANCE; an explicit 0 disables the rule.
     PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL: float = _env_float(
-        "PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL", 0.0
+        "PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL",
+        round(
+            ACCOUNT_BALANCE * _DEFAULT_PORTFOLIO_SYMBOL_EXPOSURE_PERCENT / 100,
+            2,
+        ),
+        strict=True,
     )
 
     # Telegram Alerts (Sprint 9A)
@@ -118,19 +193,24 @@ class Settings:
     # Maximum net realized loss allowed per local calendar day across
     # the whole paper account. When the day's realized PnL reaches
     # -limit, new paper trades are halted until the next day.
-    # When <= 0, no daily loss limit is enforced.
+    # Unset/blank defaults to 3% of ACCOUNT_BALANCE; an explicit 0
+    # disables the breaker.
     PORTFOLIO_DAILY_LOSS_LIMIT: float = _env_float(
-        "PORTFOLIO_DAILY_LOSS_LIMIT", 0.0
+        "PORTFOLIO_DAILY_LOSS_LIMIT",
+        round(ACCOUNT_BALANCE * _DEFAULT_PORTFOLIO_DAILY_LOSS_PERCENT / 100, 2),
+        strict=True,
     )
 
     # Maximum Open Portfolio Positions (Sprint 8B)
     # Maximum number of open paper positions allowed across the whole
     # paper account. When the current open position count reaches this
     # limit, new paper trades are rejected until existing positions are
-    # closed. Applies to all symbols combined. When <= 0, the limit is
-    # disabled.
+    # closed. Applies to all symbols combined. Unset/blank defaults to 3;
+    # an explicit 0 disables the limit.
     PORTFOLIO_MAX_OPEN_POSITIONS: int = _env_int(
-        "PORTFOLIO_MAX_OPEN_POSITIONS", 0
+        "PORTFOLIO_MAX_OPEN_POSITIONS",
+        _DEFAULT_PORTFOLIO_MAX_OPEN_POSITIONS,
+        strict=True,
     )
 
     # Background Position Monitor (Sprint 9B)
@@ -345,6 +425,8 @@ def validate_settings() -> list[SettingsIssue]:
             error(name, "must be a finite number greater than 0")
 
     for name in _LIMIT_SETTINGS:
+        if name in _INVALID_ENV_VALUES:
+            continue
         value = getattr(settings, name)
         if not _is_finite_number(value) or value < 0:
             error(
@@ -355,6 +437,8 @@ def validate_settings() -> list[SettingsIssue]:
             warning(name, "disabled (0); no limit is enforced")
 
     for name in _COUNT_LIMIT_SETTINGS:
+        if name in _INVALID_ENV_VALUES:
+            continue
         value = getattr(settings, name)
         if isinstance(value, bool) or not isinstance(value, int):
             error(name, "must be an integer >= 0 (use 0 to disable)")
@@ -362,6 +446,22 @@ def validate_settings() -> list[SettingsIssue]:
             error(name, "must be an integer >= 0 (use 0 to disable)")
         elif value == 0:
             warning(name, "disabled (0); no limit is enforced")
+
+    # A value that could not be parsed must block startup instead of
+    # silently falling back to a default: an operator who mistypes a
+    # limit should not run with a limit they did not intend.
+    for name, reason in _INVALID_ENV_VALUES.items():
+        error(name, f"{reason}; fix or remove the value in .env")
+
+    all_limits = _LIMIT_SETTINGS + _COUNT_LIMIT_SETTINGS
+    if not any(
+        name in _INVALID_ENV_VALUES for name in all_limits
+    ) and all(getattr(settings, name) == 0 for name in all_limits):
+        warning(
+            "PORTFOLIO_LIMITS",
+            "all portfolio limits are disabled (0); Guardian Mode has no "
+            "portfolio backstops",
+        )
 
     interval = settings.PAPER_MONITOR_INTERVAL_SECONDS
     if not _is_finite_number(interval):

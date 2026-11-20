@@ -19,8 +19,8 @@ candidate trade:
     2. How much exposure is already open on that symbol?
     3. Would adding the trade exceed either configured limit?
 
-Both rules are disabled by default (limit <= 0), preserving backward
-compatibility — existing installations without limits are unaffected.
+Both rules are disabled when the supplied limit is <= 0, so the
+configuration layer controls whether they run.
 """
 
 from __future__ import annotations
