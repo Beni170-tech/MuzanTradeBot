@@ -388,24 +388,46 @@ class TestRateLimitSettingsWiring:
         assert config.commands_per_window == DEFAULT_COMMANDS_PER_WINDOW
         assert config.window_seconds == DEFAULT_WINDOW_SECONDS
 
-    def test_settings_defaults_disable_rate_limiting_when_zero(self):
+    def test_settings_defaults_disable_rate_limiting_when_zero(self, monkeypatch):
+        # handlers builds ``_rate_limit_config`` once from settings, so rebuild
+        # it here the same way instead of reloading the module: a reload creates
+        # duplicate class objects (e.g. PaperStateUnreadable) that no longer
+        # match the classes other modules imported (audit finding D4).
         with patch("config.settings.settings.TELEGRAM_COMMAND_RATE_LIMIT_PER_WINDOW", 0):
             with patch("config.settings.settings.TELEGRAM_COMMAND_RATE_WINDOW_SECONDS", 10.0):
                 import telegram_bot.handlers as _handlers
-                import importlib
-                importlib.reload(_handlers)
+
+                monkeypatch.setattr(
+                    _handlers,
+                    "_rate_limit_config",
+                    build_rate_limit_config(
+                        commands_per_window=(
+                            _handlers.settings.TELEGRAM_COMMAND_RATE_LIMIT_PER_WINDOW
+                        ),
+                        window_seconds=(
+                            _handlers.settings.TELEGRAM_COMMAND_RATE_WINDOW_SECONDS
+                        ),
+                    ),
+                )
                 assert _handlers._rate_limit_config.is_enabled() is False
 
     @pytest.mark.asyncio
-    async def test_multiple_command_handlers_share_one_rate_limit_state(self):
+    async def test_multiple_command_handlers_share_one_rate_limit_state(
+        self, monkeypatch
+    ):
         import telegram_bot.handlers as _handlers
-        import importlib
-        importlib.reload(_handlers)
+        from telegram_bot.rate_limit import (
+            check_rate_limit as _original_check_rate_limit,
+        )
 
         config = _tiny_config()
         chat = 999
 
-        _patch_rate_limit_for_chosen_config(config)
+        def _dispatcher(chat_id: int, config):
+            return bool(_original_check_rate_limit(chat_id, config))
+
+        monkeypatch.setattr(_handlers, "check_rate_limit", _dispatcher)
+        monkeypatch.setattr(_handlers, "_rate_limit_config", config)
 
         calls = []
 
