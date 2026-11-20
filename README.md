@@ -204,14 +204,14 @@ journal cannot block an `/analyze` reply or look like a placed trade.
 ## Testing
 
 ```bash
-pip install -r requirements-dev.txt pytest-asyncio
+pip install -r requirements.txt -r requirements-dev.txt
 python -m pytest -q
 ```
 
-`pytest-asyncio` provides the async test fixtures and is installed
-separately. The suite runs without Telegram, network access or a real
-`.env`: tests redirect state files to temporary directories and
-monkeypatch the existing handler seams.
+`requirements-dev.txt` adds `pytest` and `pytest-asyncio`, which
+provides the async test fixtures. The suite runs without Telegram,
+network access or a real `.env`: tests redirect state files to temporary
+directories and monkeypatch the existing handler seams.
 
 ## Project Structure
 
