@@ -12,7 +12,7 @@ import pytest
 
 import telegram_bot.handlers as handlers
 from telegram_bot.handlers import _apply_trailing_stop, _is_trail_active
-from trader.paper.order import PaperOrder, PaperOrderSide
+from trader.paper.order import PaperOrder, PaperOrderSide, PaperOrderStatus
 from trader.paper.service import PaperTradingService
 from trader.trade import Trade
 
@@ -426,7 +426,7 @@ class TestApplyTrailingStop:
     def test_closed_position_not_fetched_by_get_position(self):
         # get_position only returns OPEN positions. The helper simply
         # returns None when get_position returns None, so closed positions
-        # are naturally excluded without any extra logic.
+        # are naturally excluded by the lookup itself.
         closed = _make_order(
             side="LONG",
             entry_price=100.0,
@@ -435,13 +435,62 @@ class TestApplyTrailingStop:
             status="CLOSED_MANUAL",
         )
         service = _make_service(open_position=closed)
-        # If get_position incorrectly returns a closed order, the helper
-        # still runs — but in production get_position filters by OPEN status.
+        # The lookup contract is what excludes closed positions here; the
+        # is_open() guard is covered separately below.
         # This test documents that behavior by using the real contract:
         # get_position returns None for closed positions.
         service.get_position.return_value = None
         result = _apply_trailing_stop(service, "BTC", 115.0)
         assert result is None
+        service.save_account.assert_not_called()
+
+    # --- Closed positions are never trailed ---------------------------------
+
+    def test_closed_position_is_never_trailed(self):
+        # A closed position held by reference (stale monitor snapshot, or a
+        # caller that resolved the order itself) must not be trailed: the
+        # activation path would resurrect the trailing marker and overwrite
+        # the stop recorded at exit.
+        closed = PaperOrder(
+            order_id="CLOSED-1",
+            symbol="BTC",
+            side=PaperOrderSide.LONG,
+            quantity=1.0,
+            entry_price=100.0,
+            stop_loss=90.0,
+            take_profit=130.0,
+            status=PaperOrderStatus.CLOSED_MANUAL,
+        )
+        service = _make_service(open_position=closed)
+
+        result = handlers._apply_trailing_stop_to_position(service, closed, 115.0)
+
+        assert result is None
+        assert closed.stop_loss == 90.0
+        assert not handlers._is_trail_active(closed)
+        service.save_account.assert_not_called()
+
+    def test_closed_position_with_active_trail_is_not_moved(self):
+        # Even an already-active trail must stop moving once the position
+        # is closed; otherwise the stop walks past the recorded exit price.
+        closed = PaperOrder(
+            order_id="CLOSED-2",
+            symbol="BTC",
+            side=PaperOrderSide.LONG,
+            quantity=1.0,
+            entry_price=100.0,
+            stop_loss=110.0,
+            take_profit=200.0,
+            notes=["trailing_active"],
+            initial_risk_distance=10.0,
+            status=PaperOrderStatus.TAKEN_PROFIT,
+        )
+        service = _make_service(open_position=closed)
+
+        result = handlers._apply_trailing_stop_to_position(service, closed, 150.0)
+
+        assert result is None
+        assert closed.stop_loss == 110.0
         service.save_account.assert_not_called()
 
     # --- Save called only on change -----------------------------------------

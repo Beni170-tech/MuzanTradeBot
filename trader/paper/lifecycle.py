@@ -165,6 +165,19 @@ def record_market_mark(position: object, current_price: object) -> bool:
         return False
 
 
+def _position_is_closed(position: object) -> bool:
+    """Return True only when the position is known to have closed.
+
+    A status that cannot be read as a plain string is treated as not
+    closed, so legacy shapes and test doubles keep working.
+    """
+    status = getattr(position, "status", None)
+    value = getattr(status, "value", status)
+    if not isinstance(value, str):
+        return False
+    return value not in ("PENDING", "OPEN")
+
+
 def apply_trailing_stop(
     service: PaperTradingService,
     symbol: str,
@@ -211,6 +224,7 @@ def apply_trailing_stop_to_position(
           downward, never raising an already tighter stop.
         - Never moves the stop backward.
         - Never modifies take profit.
+        - Never touches a position that has already closed.
         - Activation always saves the paper account so the trailing
           marker and initial risk distance survive a restart. After
           activation, saves only when the stop actually changes.
@@ -232,6 +246,14 @@ def apply_trailing_stop_to_position(
         stop values are provided for reporting.
     """
     if position is None:
+        return None
+
+    # Never trail a position that has already exited. The activation path
+    # would resurrect the trailing marker and overwrite the stop recorded
+    # on the closed order, making the journal disagree with the account.
+    # Only a status that positively reads as closed blocks the update, so
+    # legacy shapes and test doubles keep the previous behaviour.
+    if _position_is_closed(position):
         return None
 
     # Defensive: skip if there is no valid stop loss to trail
