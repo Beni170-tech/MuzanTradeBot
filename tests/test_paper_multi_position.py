@@ -182,9 +182,9 @@ async def test_second_position_stop_loss_does_not_close_first(
     safe, stopped = service.open_positions()
     alerts = _RecordingAlerts()
 
-    # The monitor's state_path only redirects market marks; the SL/TP save
-    # resolves the path the handler layer bound with bind_state_path, so it
-    # must be redirected too or this test writes the real paper account.
+    # The monitor's injected state_path governs this close. The handler
+    # binding is redirected to the same file as well, so the test proves the
+    # real paper account in logs/ is never touched either way.
     state_path = tmp_path / "s.json"
     monkeypatch.setattr(handlers, "PAPER_STATE_PATH", state_path)
 
@@ -217,7 +217,8 @@ async def test_second_position_take_profit_does_not_close_first(
     )
     safe, taken = service.open_positions()
 
-    # The exit save resolves the handler-bound path, not the monitor's.
+    # The monitor's injected state_path governs the exit save; the handler
+    # binding points at the same file so logs/ is never written.
     state_path = tmp_path / "s.json"
     monkeypatch.setattr(handlers, "PAPER_STATE_PATH", state_path)
 
@@ -251,7 +252,7 @@ async def test_trailing_stop_updates_only_the_intended_position(
     trailed, untouched = service.open_positions()
     alerts = _RecordingAlerts()
 
-    # A trailing change saves the account through the handler-bound path.
+    # A trailing change saves through the monitor's injected state_path.
     state_path = tmp_path / "s.json"
     monkeypatch.setattr(handlers, "PAPER_STATE_PATH", state_path)
 
@@ -303,13 +304,11 @@ async def test_trailing_stop_trigger_closes_only_that_position(
 async def test_monitor_exit_saves_only_to_the_redirected_state_path(
     tmp_path, monkeypatch
 ) -> None:
-    """A monitor exit must persist through the handler-bound state path.
+    """A monitor exit must persist through the monitor's own state path.
 
-    The monitor's own ``state_path`` only governs market marks. SL/TP and
-    trailing-stop saves resolve ``lifecycle.resolve_state_path()``, which
-    follows the provider registered by ``handlers.bind_state_path``. This
-    test proves that redirecting ``handlers.PAPER_STATE_PATH`` moves those
-    saves too, so a monitor test can never write the real ``logs/`` account.
+    The monitor is given ``state_path`` and the handler layer is bound to
+    the same file, so this end-to-end test proves the exit is written to
+    that file and the real ``logs/`` account is left alone.
     """
     service = _service_with(_trade(quantity=1.0, stop_loss=99.5, take_profit=130.0))
     (position,) = service.open_positions()

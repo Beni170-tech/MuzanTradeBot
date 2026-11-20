@@ -115,10 +115,12 @@ class PaperPositionMonitor:
                 price is available. It is invoked in a worker thread so a
                 slow lookup never blocks the event loop. Defaults to
                 :func:`market.analyzer.get_current_price`.
-            state_path: Optional path used to persist recorded market
-                marks. Defaults to the lifecycle module's shared state
-                path, resolved lazily so the monitor and the command
-                handlers always share one state file.
+            state_path: Optional path used to persist the paper account:
+                recorded market marks, stop-loss / take-profit closes and
+                trailing-stop changes all save here. Defaults to the
+                lifecycle module's shared state path, resolved lazily so
+                the monitor and the command handlers always share one
+                state file.
         """
         if interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")
@@ -128,10 +130,12 @@ class PaperPositionMonitor:
         self._interval = float(interval_seconds)
 
         # Allow tests to inject mock SL/TP and trailing-stop functions.
-        self._sltp_check = sltp_check or paper_position_check
-        self._trailing_fn = (
-            trailing_fn or apply_trailing_stop_to_position
-        )
+        # An injected function keeps its documented
+        # ``(service, position, price)`` signature and owns whatever it
+        # persists. The real lifecycle helpers are called directly so this
+        # monitor's resolved state path can be handed to them.
+        self._sltp_override = sltp_check
+        self._trailing_override = trailing_fn
 
         # Market price source. The default reuses the existing CoinGecko
         # integration; tests inject a deterministic provider.
@@ -432,7 +436,7 @@ class PaperPositionMonitor:
         # 1. Check stop-loss / take-profit first (Guardian Mode priority).
         #    The exact position is passed, never a symbol lookup: several
         #    positions may share this symbol.
-        closed = self._sltp_check(self._service, position, price)
+        closed = self._check_sltp(position, price)
         if closed is not None:
             # The helper already saved the account and closed the position.
             # Push the matching alert so the user is notified even when
@@ -449,7 +453,7 @@ class PaperPositionMonitor:
         # 2. Apply trailing stop (if applicable). When it changes the
         #    stop, push an alert.
         trail_changed = False
-        trail_result = self._trailing_fn(self._service, position, price)
+        trail_result = self._apply_trailing(position, price)
         if trail_result is not None:
             changed, old_stop, new_stop = trail_result
             trail_changed = bool(changed)
@@ -462,6 +466,53 @@ class PaperPositionMonitor:
         # change (or an SL/TP close above) already saved the account.
         if marked and not trail_changed:
             self._persist_marks()
+
+    # ------------------------------------------------------------------
+    # State path and exit helpers
+    # ------------------------------------------------------------------
+
+    def _resolved_state_path(self) -> str | Path:
+        """Return the state file every monitor write goes to.
+
+        An injected ``state_path`` always wins. Without one, the shared
+        lifecycle path is resolved lazily so a later handler rebind is
+        still honoured, exactly as before.
+        """
+        if self._state_path is not None:
+            return self._state_path
+        return _default_state_path()
+
+    def _check_sltp(self, position: "PaperOrder", price: float):
+        """Check one position for a stop-loss / take-profit exit.
+
+        An injected override is called with the documented three
+        arguments and persists however it chooses; the real helper gets
+        this monitor's resolved state path so the close is saved there.
+        """
+        if self._sltp_override is not None:
+            return self._sltp_override(self._service, position, price)
+        return paper_position_check(
+            self._service,
+            position,
+            price,
+            state_path=self._resolved_state_path(),
+        )
+
+    def _apply_trailing(self, position: "PaperOrder", price: float):
+        """Apply trailing-stop logic to one position.
+
+        Same override rule as :meth:`_check_sltp`: an injected function
+        keeps its three-argument call, while the real helper is told
+        which state file to save to.
+        """
+        if self._trailing_override is not None:
+            return self._trailing_override(self._service, position, price)
+        return apply_trailing_stop_to_position(
+            self._service,
+            position,
+            price,
+            state_path=self._resolved_state_path(),
+        )
 
     # ------------------------------------------------------------------
     # Market-mark recording
@@ -494,12 +545,7 @@ class PaperPositionMonitor:
         and swallowed; the next cycle retries with a fresh mark.
         """
         try:
-            path = (
-                self._state_path
-                if self._state_path is not None
-                else _default_state_path()
-            )
-            self._service.save_account(path)
+            self._service.save_account(self._resolved_state_path())
         except Exception:
             logger.warning(
                 "Failed to persist paper market marks; they will be "
