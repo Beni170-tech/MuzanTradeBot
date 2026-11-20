@@ -15,6 +15,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from trader.paper.entry_gates import (
     RULE_MAX_OPEN_POSITIONS,
     evaluate_entry_gates,
@@ -32,6 +34,23 @@ LIMIT_NAMES = (
     "PORTFOLIO_MAX_POSITIONS_PER_SYMBOL",
     "PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL",
 )
+
+#: Core Guardian risk inputs. They are not portfolio limits, but every
+#: limit and every position size is derived from them, so they are parsed
+#: strictly too.
+CORE_RISK_NAMES = (
+    "ACCOUNT_BALANCE",
+    "RISK_PERCENT",
+    "STOP_LOSS_PERCENT",
+    "TAKE_PROFIT_PERCENT",
+)
+
+DEFAULT_CORE_VALUES = {
+    "ACCOUNT_BALANCE": 1000.0,
+    "RISK_PERCENT": 2.0,
+    "STOP_LOSS_PERCENT": 2.0,
+    "TAKE_PROFIT_PERCENT": 4.0,
+}
 
 DEFAULT_VALUES = {
     "PORTFOLIO_RISK_LIMIT": 60.0,
@@ -59,6 +78,20 @@ _READ_LIMITS = (
     "print(json.dumps({name: getattr(s, name) for name in names}))\n"
 )
 
+_READ_CORE = (
+    "import json\n"
+    "from config.settings import settings as s, validate_settings\n"
+    f"names = {CORE_RISK_NAMES!r}\n"
+    "print(json.dumps({\n"
+    "    'values': {name: getattr(s, name) for name in names},\n"
+    "    'errors': [\n"
+    "        [issue.severity, issue.setting, issue.message]\n"
+    "        for issue in validate_settings()\n"
+    "        if issue.severity == 'error'\n"
+    "    ],\n"
+    "}))\n"
+)
+
 _READ_ERRORS = (
     "import json\n"
     "from config.settings import validate_settings\n"
@@ -70,11 +103,12 @@ _READ_ERRORS = (
 
 
 def _environment(**overrides: str) -> dict[str, str]:
-    """Return a clean environment with no inherited limit configuration."""
+    """Return a clean environment with no inherited risk configuration."""
     env = {
         key: value
         for key, value in os.environ.items()
-        if key not in LIMIT_NAMES and key != "ACCOUNT_BALANCE"
+        if key not in LIMIT_NAMES
+        and key not in CORE_RISK_NAMES
     }
     env.update(overrides)
     return env
@@ -96,6 +130,11 @@ def _run(code: str, **overrides: str) -> str:
 def _errors(overrides: dict[str, str]) -> list[list[str]]:
     payload = json.loads(_run(_READ_ERRORS, **overrides))
     return [item for item in payload if item[0] == "error"]
+
+
+def _core(overrides: dict[str, str]) -> dict:
+    """Read the core risk values and startup errors in one subprocess."""
+    return json.loads(_run(_READ_CORE, **overrides))
 
 
 class TestConservativeDefaults:
@@ -164,6 +203,89 @@ class TestMalformedLimitValues:
         assert completed.returncode == 1
         assert "Invalid configuration; refusing to start" in completed.stdout
         assert "PORTFOLIO_RISK_LIMIT" in completed.stdout
+
+
+class TestMalformedCoreRiskValues:
+    """The four core risk inputs must never fall back silently.
+
+    Task 30 made the six portfolio limits strict. These inputs are not
+    limits, but every limit and every position size is derived from
+    them, so a mistyped value there rescales the whole risk budget. It
+    must block startup and name the variable instead.
+    """
+
+    def test_unset_core_values_use_the_documented_defaults(self):
+        payload = _core({})
+        assert payload["values"] == DEFAULT_CORE_VALUES
+        assert payload["errors"] == []
+
+    def test_blank_core_values_use_the_defaults(self):
+        payload = _core({name: "" for name in CORE_RISK_NAMES})
+        assert payload["values"] == DEFAULT_CORE_VALUES
+        assert payload["errors"] == []
+
+    def test_valid_core_values_are_used_verbatim(self):
+        payload = _core(
+            {
+                "ACCOUNT_BALANCE": "2500",
+                "RISK_PERCENT": "1.5",
+                "STOP_LOSS_PERCENT": "1.0",
+                "TAKE_PROFIT_PERCENT": "3.0",
+            }
+        )
+        assert payload["values"] == {
+            "ACCOUNT_BALANCE": 2500.0,
+            "RISK_PERCENT": 1.5,
+            "STOP_LOSS_PERCENT": 1.0,
+            "TAKE_PROFIT_PERCENT": 3.0,
+        }
+        assert payload["errors"] == []
+
+        # The derived portfolio defaults follow the configured balance
+        # rather than a fallback value.
+        limits = json.loads(_run(_READ_LIMITS, ACCOUNT_BALANCE="2500"))
+        assert limits["PORTFOLIO_RISK_LIMIT"] == 150.0
+        assert limits["PORTFOLIO_EXPOSURE_LIMIT"] == 7500.0
+        assert limits["PORTFOLIO_DAILY_LOSS_LIMIT"] == 75.0
+        assert limits["PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL"] == 5000.0
+
+    @pytest.mark.parametrize(
+        ("name", "value"),
+        [
+            ("ACCOUNT_BALANCE", "10O0"),
+            ("RISK_PERCENT", "2%"),
+            ("STOP_LOSS_PERCENT", "2 percent"),
+            ("TAKE_PROFIT_PERCENT", "nan"),
+        ],
+    )
+    def test_malformed_core_value_is_a_startup_error(self, name, value):
+        payload = _core({name: value})
+        assert payload["errors"], f"{name}={value!r} was accepted silently"
+        # Every error must name this variable and nothing else, so a
+        # mistyped input can never be attributed to another setting.
+        assert {setting for _, setting, _ in payload["errors"]} == {name}
+        assert any(
+            "fix or remove the value in .env" in message
+            for _, _, message in payload["errors"]
+        )
+
+    def test_main_refuses_to_start_on_malformed_account_balance(self):
+        env = _environment(ACCOUNT_BALANCE="10O0")
+        env.pop("TELEGRAM_BOT_TOKEN", None)
+        completed = subprocess.run(
+            [sys.executable, "main.py"],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert completed.returncode == 1
+        assert "Invalid configuration; refusing to start" in completed.stdout
+        assert "ACCOUNT_BALANCE" in completed.stdout
+        # Configuration errors are checked before the Telegram token, so
+        # the run is stopped by the malformed value, not by the token.
+        assert "TELEGRAM_BOT_TOKEN is not set" not in completed.stdout
 
 
 class TestDefaultGateIntegration:

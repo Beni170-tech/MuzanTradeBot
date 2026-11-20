@@ -37,11 +37,12 @@ python main.py
 ```
 
 `main.py` refuses to start when configuration validation finds an error
-(a negative limit, a non-finite number, a zero `RISK_PERCENT`), when
-`EXECUTION_MODE` is not valid for the current `PAPER_TRADING` intent, or
-when `TELEGRAM_BOT_TOKEN` is missing. Warnings for disabled safety
-limits are printed without blocking startup. Values are never printed,
-only setting names and the reason.
+(a negative limit, a non-finite number, a malformed value for any risk
+setting, a zero `RISK_PERCENT`), when `EXECUTION_MODE` is not valid for
+the current `PAPER_TRADING` intent, or when `TELEGRAM_BOT_TOKEN` is
+missing. Warnings for disabled safety limits are printed without
+blocking startup. Values are never printed, only setting names and the
+reason.
 
 ## Configuration
 
@@ -80,6 +81,13 @@ Portfolio limits (`PORTFOLIO_RISK_LIMIT`,
 conservative values derived from `ACCOUNT_BALANCE`; set one to `0` to
 disable that gate explicitly. See
 [Guardian Limits](#guardian-limits-and-entry-gates).
+
+`ACCOUNT_BALANCE`, `RISK_PERCENT`, `STOP_LOSS_PERCENT` and
+`TAKE_PROFIT_PERCENT` are parsed strictly, because every limit and every
+position size is derived from them. Unset or blank keeps the default
+shown above; a malformed or non-finite value (`10O0`, `2%`, `nan`) is a
+configuration error that names the variable and blocks startup, instead
+of silently reverting to a default that would rescale the risk budget.
 Exchange API keys (`BINANCE_*`, `BYBIT_*`, `KRAKEN_*`) may be set for
 future use; no live backend consumes them.
 

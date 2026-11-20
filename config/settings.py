@@ -130,10 +130,17 @@ class Settings:
     EXECUTION_MODE: str = os.getenv("EXECUTION_MODE", "PAPER").strip().upper()
 
     # Risk Profile (Guardian Mode parameters)
-    ACCOUNT_BALANCE: float = _env_float("ACCOUNT_BALANCE", 1000.0)
-    RISK_PERCENT: float = _env_float("RISK_PERCENT", 2.0)
-    STOP_LOSS_PERCENT: float = _env_float("STOP_LOSS_PERCENT", 2.0)
-    TAKE_PROFIT_PERCENT: float = _env_float("TAKE_PROFIT_PERCENT", 4.0)
+    # These are the inputs every portfolio limit and every position is
+    # sized from, so they are parsed strictly: unset/blank keeps the
+    # documented default, while a malformed or non-finite value is
+    # recorded and blocks startup by name instead of silently reverting
+    # to a default that would rescale the whole risk budget.
+    ACCOUNT_BALANCE: float = _env_float("ACCOUNT_BALANCE", 1000.0, strict=True)
+    RISK_PERCENT: float = _env_float("RISK_PERCENT", 2.0, strict=True)
+    STOP_LOSS_PERCENT: float = _env_float("STOP_LOSS_PERCENT", 2.0, strict=True)
+    TAKE_PROFIT_PERCENT: float = _env_float(
+        "TAKE_PROFIT_PERCENT", 4.0, strict=True
+    )
 
     # Portfolio Risk Manager (Sprint 7A)
     # Maximum total dollar risk across all open paper positions.
