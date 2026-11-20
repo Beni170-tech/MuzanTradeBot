@@ -327,8 +327,20 @@ class TestHandlerRateLimitBehavior:
         assert "Too many requests" in msg
 
     @pytest.mark.asyncio
-    async def test_analyze_command_runs_when_not_rate_limited(self):
+    async def test_analyze_command_runs_when_not_rate_limited(
+        self, monkeypatch, tmp_path
+    ):
+        import telegram_bot.handlers as handlers
         from telegram_bot.handlers import analyze
+
+        # This run reaches the paper service and the trade journal, so both
+        # real state paths must be redirected to the test's tmp_path.
+        monkeypatch.setattr(
+            handlers, "PAPER_STATE_PATH", tmp_path / "state.json"
+        )
+        monkeypatch.setattr(
+            handlers, "log_trade", lambda *args, **kwargs: True
+        )
 
         config = _tiny_config()
         update = MagicMock()

@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import telegram_bot.handlers as handlers
+from trader.paper import lifecycle
 from trader.paper.monitor import PaperPositionMonitor
 from trader.paper.order import PaperOrderStatus
 from trader.paper.service import PaperTradingService
@@ -167,7 +168,9 @@ async def test_each_position_gets_its_own_symbol_price(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_second_position_stop_loss_does_not_close_first(tmp_path) -> None:
+async def test_second_position_stop_loss_does_not_close_first(
+    tmp_path, monkeypatch
+) -> None:
     """The first position is safe; the second is stopped out.
 
     A first-position-by-symbol lookup would have closed the wrong one.
@@ -179,10 +182,16 @@ async def test_second_position_stop_loss_does_not_close_first(tmp_path) -> None:
     safe, stopped = service.open_positions()
     alerts = _RecordingAlerts()
 
+    # The monitor's state_path only redirects market marks; the SL/TP save
+    # resolves the path the handler layer bound with bind_state_path, so it
+    # must be redirected too or this test writes the real paper account.
+    state_path = tmp_path / "s.json"
+    monkeypatch.setattr(handlers, "PAPER_STATE_PATH", state_path)
+
     monitor = _monitor(
         service,
         prices={"BTC": 99.0},
-        state_path=tmp_path / "s.json",
+        state_path=state_path,
         alerts=alerts,
     )
     await monitor.monitor_open_positions()
@@ -199,14 +208,20 @@ async def test_second_position_stop_loss_does_not_close_first(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_second_position_take_profit_does_not_close_first(tmp_path) -> None:
+async def test_second_position_take_profit_does_not_close_first(
+    tmp_path, monkeypatch
+) -> None:
     service = _service_with(
         _trade(quantity=1.0, stop_loss=90.0, take_profit=130.0),
         _trade(quantity=2.0, stop_loss=90.0, take_profit=104.0),
     )
     safe, taken = service.open_positions()
 
-    monitor = _monitor(service, prices={"BTC": 105.0}, state_path=tmp_path / "s.json")
+    # The exit save resolves the handler-bound path, not the monitor's.
+    state_path = tmp_path / "s.json"
+    monkeypatch.setattr(handlers, "PAPER_STATE_PATH", state_path)
+
+    monitor = _monitor(service, prices={"BTC": 105.0}, state_path=state_path)
     await monitor.monitor_open_positions()
 
     assert taken.status == PaperOrderStatus.TAKEN_PROFIT
@@ -222,7 +237,9 @@ async def test_second_position_take_profit_does_not_close_first(tmp_path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_trailing_stop_updates_only_the_intended_position(tmp_path) -> None:
+async def test_trailing_stop_updates_only_the_intended_position(
+    tmp_path, monkeypatch
+) -> None:
     # First: entry 100, stop 90 → 1R = 10, price 115 activates trailing
     # and moves the stop to break-even (100).
     # Second: entry 100, stop 80 → 1R = 20, price 115 is below 120, so it
@@ -234,10 +251,14 @@ async def test_trailing_stop_updates_only_the_intended_position(tmp_path) -> Non
     trailed, untouched = service.open_positions()
     alerts = _RecordingAlerts()
 
+    # A trailing change saves the account through the handler-bound path.
+    state_path = tmp_path / "s.json"
+    monkeypatch.setattr(handlers, "PAPER_STATE_PATH", state_path)
+
     monitor = _monitor(
         service,
         prices={"BTC": 115.0},
-        state_path=tmp_path / "s.json",
+        state_path=state_path,
         alerts=alerts,
     )
     await monitor.monitor_open_positions()
@@ -250,7 +271,9 @@ async def test_trailing_stop_updates_only_the_intended_position(tmp_path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_trailing_stop_trigger_closes_only_that_position(tmp_path) -> None:
+async def test_trailing_stop_trigger_closes_only_that_position(
+    tmp_path, monkeypatch
+) -> None:
     """One position's trailed stop is hit; the other (same symbol) remains."""
     service = _service_with(
         _trade(quantity=1.0, stop_loss=90.0, take_profit=200.0),
@@ -259,6 +282,7 @@ async def test_trailing_stop_trigger_closes_only_that_position(tmp_path) -> None
     trailed, untouched = service.open_positions()
 
     state = tmp_path / "s.json"
+    monkeypatch.setattr(handlers, "PAPER_STATE_PATH", state)
     # First cycle at 115 trails `trailed` to break-even and leaves the
     # other position alone.
     await _monitor(service, prices={"BTC": 115.0}, state_path=state).monitor_open_positions()
@@ -273,6 +297,38 @@ async def test_trailing_stop_trigger_closes_only_that_position(tmp_path) -> None
     assert untouched.status == PaperOrderStatus.OPEN
     assert untouched.stop_loss == pytest.approx(80.0)
     assert service.open_positions() == [untouched]
+
+
+@pytest.mark.asyncio
+async def test_monitor_exit_saves_only_to_the_redirected_state_path(
+    tmp_path, monkeypatch
+) -> None:
+    """A monitor exit must persist through the handler-bound state path.
+
+    The monitor's own ``state_path`` only governs market marks. SL/TP and
+    trailing-stop saves resolve ``lifecycle.resolve_state_path()``, which
+    follows the provider registered by ``handlers.bind_state_path``. This
+    test proves that redirecting ``handlers.PAPER_STATE_PATH`` moves those
+    saves too, so a monitor test can never write the real ``logs/`` account.
+    """
+    service = _service_with(_trade(quantity=1.0, stop_loss=99.5, take_profit=130.0))
+    (position,) = service.open_positions()
+
+    state_path = tmp_path / "s.json"
+    monkeypatch.setattr(handlers, "PAPER_STATE_PATH", state_path)
+    assert lifecycle.default_state_path() == state_path
+
+    await _monitor(
+        service, prices={"BTC": 99.0}, state_path=state_path
+    ).monitor_open_positions()
+
+    assert position.status == PaperOrderStatus.STOPPED
+    assert state_path.exists()
+    assert "STOPPED" in state_path.read_text(encoding="utf-8")
+
+    reloaded = PaperTradingService.load_account(state_path)
+    assert reloaded.open_positions() == []
+    assert len(reloaded.closed_positions()) == 1
 
 
 # ---------------------------------------------------------------------------
