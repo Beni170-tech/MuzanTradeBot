@@ -28,8 +28,10 @@ applied it:
       it allows ``prospective <= limit``.
     - Portfolio exposure rejects when the current plus requested
       notional exposure is strictly greater than the limit.
-    - The daily loss brake trips when the day's net realized PnL is
-      ``<= -limit``.
+    - The daily loss brake trips when the day's loss (settled PnL plus
+      floating PnL at recorded marks) is ``<= -limit``. An open position
+      with no usable mark cannot be valued, so the gate rejects rather
+      than assuming the floating loss is zero.
     - Maximum open positions rejects when the current count is
       ``>= limit``.
     - Symbol concentration rejects when the symbol's open position
@@ -245,7 +247,12 @@ def _gate_portfolio_exposure(
 def _gate_daily_loss(
     backend, trade: "Trade", limits: _GateLimits, *, need_metrics: bool
 ) -> GateSnapshot:
-    """Gate 3: daily loss brake. Trips at ``net PnL <= -limit``."""
+    """Gate 3: daily loss brake. Trips at ``day loss <= -limit``.
+
+    The day's loss includes floating PnL at recorded marks. When an open
+    position has no usable mark the day cannot be measured, and the gate
+    rejects instead of treating the unknown as zero loss.
+    """
     limit = limits.daily_loss_limit
     if limit <= 0:
         return _disabled(RULE_DAILY_LOSS)
@@ -259,15 +266,27 @@ def _gate_daily_loss(
     if allowed:
         return _allowed(RULE_DAILY_LOSS, daily_metrics)
 
-    return _reject(
-        RULE_DAILY_LOSS,
-        (
-            f"net realized PnL ${daily_metrics.realized_pnl_today:,.2f} "
+    if daily_metrics.day_unmeasurable:
+        detail = (
+            "the paper account could not report open positions; the day's "
+            "floating loss cannot be measured"
+        )
+    elif daily_metrics.unpriced_symbols:
+        detail = (
+            "no usable market mark for open position(s) "
+            + ", ".join(daily_metrics.unpriced_symbols)
+            + "; the day's floating loss cannot be measured"
+        )
+    else:
+        detail = (
+            f"day loss ${daily_metrics.day_loss:,.2f} "
+            f"(realized ${daily_metrics.realized_pnl_today:,.2f}, "
+            f"floating ${daily_metrics.open_unrealized_pnl:,.2f}) "
             f"on {daily_metrics.day} reached the daily loss limit "
             f"${limit:,.2f}"
-        ),
-        daily_metrics,
-    )
+        )
+
+    return _reject(RULE_DAILY_LOSS, detail, daily_metrics)
 
 
 def _gate_max_open_positions(
@@ -383,7 +402,8 @@ def evaluate_entry_gates(
         trade: The candidate trade to evaluate. It is never modified.
         portfolio_risk_limit: Maximum prospective portfolio risk.
         portfolio_exposure_limit: Maximum prospective notional exposure.
-        daily_loss_limit: Maximum net realized loss for the day.
+        daily_loss_limit: Maximum combined settled plus floating loss
+            for the day.
         max_open_positions: Maximum portfolio-wide open positions.
         max_positions_per_symbol: Maximum open positions on one symbol.
         max_exposure_per_symbol: Maximum notional exposure on one symbol.
@@ -435,7 +455,8 @@ class EntryGateMetrics:
     Attributes:
         portfolio_risk: Current risk against the portfolio risk limit.
         portfolio_exposure: Current notional exposure against its limit.
-        daily_loss: Today's realized PnL against the daily loss limit.
+        daily_loss: Today's settled plus floating PnL against the daily
+            loss limit.
         max_open_positions: Open-position capacity usage.
         symbol_concentration: One snapshot per symbol with open
             positions, ordered by symbol exposure descending. This is a
@@ -481,7 +502,8 @@ def collect_entry_gate_metrics(
             ``closed_positions``.
         portfolio_risk_limit: Maximum prospective portfolio risk.
         portfolio_exposure_limit: Maximum prospective notional exposure.
-        daily_loss_limit: Maximum net realized loss for the day.
+        daily_loss_limit: Maximum combined settled plus floating loss
+            for the day.
         max_open_positions: Maximum portfolio-wide open positions.
         max_positions_per_symbol: Maximum open positions on one symbol.
         max_exposure_per_symbol: Maximum notional exposure on one symbol.

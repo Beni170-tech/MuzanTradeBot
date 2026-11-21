@@ -66,15 +66,28 @@ def _make_position(
     quantity=10.0,
     stop_loss=98.0,
     side="LONG",
+    mark_price=None,
 ):
-    """Create a minimal open-position shape."""
-    return SimpleNamespace(
+    """Create a minimal open-position shape.
+
+    A position is marked at its entry price unless a mark is supplied, so
+    it carries a usable mark with zero floating PnL: the shape the daily
+    brake requires before it will measure the floating side of a day.
+    """
+    mark = entry_price if mark_price is None else mark_price
+    position = SimpleNamespace(
         symbol=symbol,
         entry_price=entry_price,
         quantity=quantity,
         stop_loss=stop_loss,
         side=PaperOrderSide(side),
+        mark_price=mark,
     )
+    sign = 1.0 if side == "LONG" else -1.0
+    position.unrealized_pnl_for = (
+        lambda price: (price - entry_price) * quantity * sign
+    )
+    return position
 
 
 def _make_trade(
@@ -438,6 +451,57 @@ class TestSymbolConcentrationGate:
             max_exposure_per_symbol=10.0,
         )
         assert outcome.rule == RULE_SYMBOL_POSITIONS
+
+
+# ---------------------------------------------------------------------------
+# Daily loss: floating PnL and unmarked positions
+# ---------------------------------------------------------------------------
+
+
+class TestDailyLossFloatingPnl:
+    def test_floating_loss_alone_rejects(self):
+        # -150 floating, no settled PnL, 100 daily budget.
+        backend = _Backend([_make_position(mark_price=85.0)])
+        outcome = _evaluate(backend, _make_trade(), daily_loss_limit=100.0)
+
+        assert outcome.allowed is False
+        assert outcome.rule == RULE_DAILY_LOSS
+        assert "floating" in outcome.detail
+        assert outcome.metrics.day_loss == -150.0
+
+    def test_floating_loss_under_limit_allows(self):
+        backend = _Backend([_make_position(mark_price=99.0)])
+        outcome = _evaluate(backend, _make_trade(), daily_loss_limit=100.0)
+
+        assert outcome.allowed is True
+        assert outcome.rule is None
+
+    def test_unpriced_position_rejects_and_names_it(self):
+        position = _make_position(symbol="BTC")
+        position.mark_price = None
+        backend = _Backend([position])
+
+        outcome = _evaluate(backend, _make_trade(), daily_loss_limit=100.0)
+
+        assert outcome.allowed is False
+        assert outcome.rule == RULE_DAILY_LOSS
+        assert "no usable market mark" in outcome.detail
+        assert "BTC" in outcome.detail
+        assert outcome.metrics.unpriced_symbols == ("BTC",)
+
+    def test_unpriced_position_never_masks_an_earlier_gate(self):
+        position = _make_position()
+        position.mark_price = None
+        backend = _Backend([position])
+
+        outcome = _evaluate(
+            backend,
+            _make_trade(),
+            portfolio_risk_limit=1.0,
+            daily_loss_limit=100.0,
+        )
+
+        assert outcome.rule == RULE_PORTFOLIO_RISK
 
 
 # ---------------------------------------------------------------------------

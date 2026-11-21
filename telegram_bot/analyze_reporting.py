@@ -118,11 +118,45 @@ def entry_gate_rejection_message(
         )
 
     if outcome.rule == RULE_DAILY_LOSS:
+        # Older snapshots and simple doubles may not carry the floating
+        # fields; they then describe a settled-only day.
+        unpriced = getattr(metrics, "unpriced_symbols", ())
+        unmeasurable = getattr(metrics, "day_unmeasurable", False)
+        floating_pnl = getattr(metrics, "open_unrealized_pnl", 0.0)
+        if unmeasurable:
+            return (
+                f"\n⛔ Daily Loss Limit Reached\n"
+                f"   Day: {metrics.day}\n"
+                f"   Open positions could not be read.\n"
+                f"   The day's floating loss cannot be measured.\n"
+                f"   The trade was not placed.\n"
+                f"   New paper trades resume once open positions can be "
+                f"priced again."
+            )
+        if unpriced:
+            return (
+                f"\n⛔ Daily Loss Limit Reached\n"
+                f"   Day: {metrics.day}\n"
+                f"   Unpriced Positions: "
+                f"{', '.join(unpriced)}\n"
+                f"   The day's floating loss cannot be measured without a "
+                f"market mark.\n"
+                f"   The trade was not placed.\n"
+                f"   New paper trades resume once every open position is "
+                f"priced again."
+            )
+        floating_line = ""
+        if floating_pnl:
+            floating_line = (
+                f"   Open Unrealized PnL: "
+                f"{pnl_formatter(floating_pnl)}\n"
+            )
         return (
             f"\n⛔ Daily Loss Limit Reached\n"
             f"   Day: {metrics.day}\n"
             f"   Today's Realized PnL: "
             f"{pnl_formatter(metrics.realized_pnl_today)}\n"
+            f"{floating_line}"
             f"   Daily Loss Limit: ${metrics.loss_limit:,.2f}\n"
             f"   The trade was not placed.\n"
             f"   New paper trades resume on the next day."

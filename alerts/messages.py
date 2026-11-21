@@ -200,10 +200,35 @@ def daily_loss_breaker_message(metrics: "DailyRiskMetrics") -> str:
         A Telegram-ready alert message with the day's PnL, the limit,
         and a note that trading resumes tomorrow.
     """
+    floating = ""
+    if metrics.open_unrealized_pnl:
+        floating = (
+            "Open Unrealized PnL: "
+            f"{_fmt_signed_money(metrics.open_unrealized_pnl)}\n"
+        )
+    if metrics.day_unmeasurable:
+        return (
+            f"⛔ Daily Loss Breaker Activated\n\n"
+            f"Day: {metrics.day}\n"
+            f"Daily Loss Limit: {_fmt_money(metrics.loss_limit)}\n"
+            "Open positions could not be read, so the day's floating loss "
+            "is unknown. New paper trades are halted."
+        )
+    if metrics.unpriced_symbols:
+        return (
+            f"⛔ Daily Loss Breaker Activated\n\n"
+            f"Day: {metrics.day}\n"
+            f"Unpriced positions: {', '.join(metrics.unpriced_symbols)}\n"
+            f"Daily Loss Limit: {_fmt_money(metrics.loss_limit)}\n"
+            "The day's floating loss cannot be measured without a market "
+            "mark. New paper trades are halted until every open position "
+            "is priced."
+        )
     return (
         f"⛔ Daily Loss Breaker Activated\n\n"
         f"Day: {metrics.day}\n"
         f"Today's Realized PnL: {_fmt_signed_money(metrics.realized_pnl_today)}\n"
+        f"{floating}"
         f"Daily Loss Limit: {_fmt_money(metrics.loss_limit)}\n"
         f"New paper trades are halted until tomorrow."
     )

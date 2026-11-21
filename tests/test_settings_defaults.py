@@ -296,13 +296,19 @@ class TestDefaultGateIntegration:
         )
 
     def _position(self, symbol: str):
-        return SimpleNamespace(
+        # A real open position carries a market mark; mark it at entry so
+        # the daily-loss brake can measure the floating side of the day
+        # (an unmarked position fails closed and would reject earlier).
+        position = SimpleNamespace(
             symbol=symbol,
             entry_price=100.0,
             quantity=0.01,
             stop_loss=98.0,
             side=PaperOrderSide("LONG"),
+            mark_price=100.0,
         )
+        position.unrealized_pnl_for = lambda price: (price - 100.0) * 0.01
+        return position
 
     def _trade(self):
         return Trade(

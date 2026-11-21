@@ -125,6 +125,40 @@ class TestRejectionMessageText:
             "   New paper trades resume on the next day."
         )
 
+    def test_daily_loss_text_reports_floating_pnl(self):
+        trade = _make_trade()
+        metrics = SimpleNamespace(
+            day="2026-01-15",
+            realized_pnl_today=-20.0,
+            loss_limit=100.0,
+            open_unrealized_pnl=-90.0,
+            day_loss=-110.0,
+            unpriced_symbols=(),
+            day_unmeasurable=False,
+        )
+        text = analyze_reporting.entry_gate_rejection_message(
+            trade, _outcome(RULE_DAILY_LOSS, metrics)
+        )
+        assert "Open Unrealized PnL: -$90.00\n" in text
+        assert "Today's Realized PnL: -$20.00\n" in text
+
+    def test_daily_loss_text_reports_unpriced_positions(self):
+        trade = _make_trade()
+        metrics = SimpleNamespace(
+            day="2026-01-15",
+            realized_pnl_today=0.0,
+            loss_limit=100.0,
+            open_unrealized_pnl=0.0,
+            day_loss=0.0,
+            unpriced_symbols=("BTC",),
+            day_unmeasurable=False,
+        )
+        text = analyze_reporting.entry_gate_rejection_message(
+            trade, _outcome(RULE_DAILY_LOSS, metrics)
+        )
+        assert "Unpriced Positions: BTC" in text
+        assert "cannot be measured" in text
+
     def test_max_open_positions_text(self):
         trade = _make_trade()
         metrics = SimpleNamespace(current_open_positions=3, limit=3)

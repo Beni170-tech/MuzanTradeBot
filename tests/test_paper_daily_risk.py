@@ -8,14 +8,16 @@ reported by /analyze and the Daily Risk section in /stats.
 
 Semantics under test (as approved):
     - "Today" is the local calendar day (datetime.now()).
-    - Net realized PnL counts realized losses and profits of positions
-      closed today; unrealized PnL is ignored (only closed positions
-      are ever summed).
-    - The brake trips the moment the day's net realized PnL reaches
-      -limit (loss >= limit stops trading: net <= -limit).
+    - The day figure is settled PnL for positions closed today plus
+      floating PnL on open positions at their recorded marks.
+    - The brake trips the moment the combined figure reaches -limit
+      (loss >= limit stops trading: combined <= -limit).
+    - A missing or unusable mark is never treated as zero loss: the
+      brake fails closed and new entries are halted.
 """
 
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -25,8 +27,10 @@ from trader.paper.daily_risk import (
     DailyRiskManager,
     DailyRiskMetrics,
     loss_limit_reached,
+    open_unrealized_pnl,
     realized_pnl_on_day,
     remaining_loss_budget,
+    usable_mark,
 )
 
 
@@ -48,12 +52,35 @@ def _make_closed(realized_pnl=0.0, exit_at=None):
     return order
 
 
-def _make_broker(closed_positions=None):
-    """Create a minimal broker mock exposing closed positions."""
+def _make_broker(closed_positions=None, open_positions=None):
+    """Create a minimal broker mock exposing closed and open positions."""
     broker = MagicMock()
     broker.account = MagicMock()
     broker.account.closed_positions = closed_positions or []
+    broker.get_open_positions.return_value = list(open_positions or [])
     return broker
+
+
+def _make_open(
+    symbol="BTC",
+    entry_price=100.0,
+    quantity=10.0,
+    mark_price=None,
+    side="LONG",
+):
+    """Create a minimal open position with a recorded mark."""
+    position = SimpleNamespace(
+        symbol=symbol,
+        entry_price=entry_price,
+        quantity=quantity,
+        mark_price=mark_price,
+        side=SimpleNamespace(value=side),
+    )
+    sign = 1.0 if side == "LONG" else -1.0
+    position.unrealized_pnl_for = (
+        lambda price: (price - entry_price) * quantity * sign
+    )
+    return position
 
 
 # ---------------------------------------------------------------------------
@@ -512,3 +539,185 @@ class TestStatsDailyRiskSection:
         assert m.breached is False
         assert m.remaining_budget == 80.0
         assert m.loss_usage_percent == 20.0
+
+
+
+# ---------------------------------------------------------------------------
+# Floating PnL at recorded marks
+# ---------------------------------------------------------------------------
+
+
+class TestUsableMark:
+    def test_valid_mark_is_returned_as_float(self):
+        assert usable_mark(_make_open(mark_price=98)) == 98.0
+
+    @pytest.mark.parametrize(
+        "mark",
+        [None, 0.0, -5.0, float("nan"), float("inf"), "100", True],
+    )
+    def test_unusable_mark_is_rejected(self, mark):
+        assert usable_mark(_make_open(mark_price=mark)) is None
+
+    def test_missing_attribute_is_rejected(self):
+        assert usable_mark(SimpleNamespace(symbol="BTC")) is None
+
+
+class TestOpenUnrealizedPnl:
+    def test_no_positions(self):
+        assert open_unrealized_pnl([]) == (0.0, ())
+
+    def test_sums_floating_pnl_across_positions(self):
+        positions = [
+            _make_open(symbol="BTC", mark_price=98.0),    # -20
+            _make_open(symbol="ETH", mark_price=104.0),   # +40
+        ]
+        assert open_unrealized_pnl(positions) == (20.0, ())
+
+    def test_short_position_pnl_is_inverted(self):
+        positions = [_make_open(side="SHORT", mark_price=90.0)]  # +100
+        assert open_unrealized_pnl(positions) == (100.0, ())
+
+    def test_unpriced_positions_are_named_not_dropped(self):
+        positions = [
+            _make_open(symbol="BTC", mark_price=None),
+            _make_open(symbol="ETH", mark_price=98.0),
+        ]
+        total, unpriced = open_unrealized_pnl(positions)
+        assert total == -20.0
+        assert unpriced == ("BTC",)
+
+
+class TestFloatingPnlBrake:
+    def test_floating_loss_trips_with_no_realized_pnl(self):
+        broker = _make_broker([], [_make_open(mark_price=85.0)])  # -150
+        manager = DailyRiskManager(broker, daily_loss_limit=100.0)
+
+        assert manager.evaluate().allowed is False
+        m = manager.metrics()
+        assert m.realized_pnl_today == 0.0
+        assert m.open_unrealized_pnl == -150.0
+        assert m.day_loss == -150.0
+        assert m.loss_usage_percent == 150.0
+        assert m.remaining_budget == 0.0
+        assert m.breached is True
+        assert m.unpriced_symbols == ()
+        assert m.day_unmeasurable is False
+
+    def test_floating_loss_under_limit_allows(self):
+        broker = _make_broker([], [_make_open(mark_price=96.0)])  # -40
+        manager = DailyRiskManager(broker, daily_loss_limit=100.0)
+
+        assert manager.evaluate().allowed is True
+        m = manager.metrics()
+        assert m.day_loss == -40.0
+        assert m.remaining_budget == 60.0
+        assert m.breached is False
+
+    def test_floating_gain_offsets_realized_loss(self):
+        # -120 settled, +50 floating -> -70 for the day: still under 100.
+        broker = _make_broker(
+            [_make_closed(realized_pnl=-120.0, exit_at=f"{_today()} 10:00:00")],
+            [_make_open(mark_price=105.0)],
+        )
+        manager = DailyRiskManager(broker, daily_loss_limit=100.0)
+
+        assert manager.evaluate().allowed is True
+        assert manager.metrics().day_loss == -70.0
+
+    def test_realized_and_floating_losses_accumulate(self):
+        broker = _make_broker(
+            [_make_closed(realized_pnl=-80.0, exit_at=f"{_today()} 10:00:00")],
+            [_make_open(mark_price=95.0)],  # -50
+        )
+        manager = DailyRiskManager(broker, daily_loss_limit=100.0)
+
+        assert manager.evaluate().allowed is False
+        m = manager.metrics()
+        assert m.day_loss == -130.0
+        assert m.breached is True
+
+    def test_floating_gain_alone_never_halts(self):
+        broker = _make_broker([], [_make_open(mark_price=200.0)])
+        manager = DailyRiskManager(broker, daily_loss_limit=100.0)
+
+        assert manager.evaluate().allowed is True
+        assert manager.metrics().day_loss == 1000.0
+
+    def test_disabled_limit_ignores_floating_pnl(self):
+        broker = _make_broker([], [_make_open(mark_price=10.0)])
+        manager = DailyRiskManager(broker, daily_loss_limit=0.0)
+
+        assert manager.evaluate().allowed is True
+        m = manager.metrics()
+        assert m.breached is False
+        assert m.day_loss == 0.0
+        assert m.open_unrealized_pnl == 0.0
+
+
+class TestUnpricedPositionsFailClosed:
+    def test_missing_mark_halts_and_fails_closed(self):
+        broker = _make_broker([], [_make_open(symbol="BTC", mark_price=None)])
+        manager = DailyRiskManager(broker, daily_loss_limit=100.0)
+
+        check = manager.evaluate()
+        assert check.allowed is False
+        assert "BTC" in check.reason
+
+        m = manager.metrics()
+        assert m.breached is True
+        assert m.unpriced_symbols == ("BTC",)
+        assert m.day_loss == 0.0
+
+    @pytest.mark.parametrize(
+        "mark",
+        [0.0, -5.0, float("nan"), "100", True],
+    )
+    def test_invalid_mark_halts(self, mark):
+        broker = _make_broker([], [_make_open(mark_price=mark)])
+        manager = DailyRiskManager(broker, daily_loss_limit=100.0)
+
+        assert manager.evaluate().allowed is False
+        assert manager.metrics().unpriced_symbols == ("BTC",)
+
+    def test_one_unpriced_position_is_enough_to_halt(self):
+        broker = _make_broker(
+            [],
+            [
+                _make_open(symbol="BTC", mark_price=98.0),
+                _make_open(symbol="ETH", mark_price=None),
+            ],
+        )
+        manager = DailyRiskManager(broker, daily_loss_limit=100.0)
+
+        assert manager.evaluate().allowed is False
+        m = manager.metrics()
+        assert m.unpriced_symbols == ("ETH",)
+        assert m.day_loss == -20.0
+
+    def test_unreadable_open_positions_halt(self):
+        # A broker that cannot report open positions makes the day's
+        # floating result unknown; it is never assumed to be zero.
+        broker = SimpleNamespace(
+            account=SimpleNamespace(closed_positions=[])
+        )
+        manager = DailyRiskManager(broker, daily_loss_limit=100.0)
+
+        check = manager.evaluate()
+        assert check.allowed is False
+        assert "open positions" in check.reason
+
+        m = manager.metrics()
+        assert m.breached is True
+        assert m.day_unmeasurable is True
+        assert m.unpriced_symbols == ()
+
+    def test_disabled_limit_ignores_unpriced_positions(self):
+        broker = _make_broker([], [_make_open(mark_price=None)])
+        manager = DailyRiskManager(broker, daily_loss_limit=0.0)
+
+        assert manager.evaluate().allowed is True
+        m = manager.metrics()
+        assert m.breached is False
+        assert m.day_unmeasurable is False
+        # A disabled brake reports no usage at all.
+        assert m.loss_usage_percent == 0.0

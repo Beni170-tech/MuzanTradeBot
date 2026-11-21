@@ -1381,7 +1381,16 @@ async def stats_command(
 
     if gate_metrics.daily_loss is not None:
         daily_metrics = gate_metrics.daily_loss
-        if daily_metrics.breached:
+        if daily_metrics.day_unmeasurable:
+            daily_status = (
+                "⛔ Open positions could not be read — new trades halted."
+            )
+        elif daily_metrics.unpriced_symbols:
+            daily_status = (
+                "⛔ Open position has no market mark — new trades halted "
+                "until it can be priced."
+            )
+        elif daily_metrics.breached:
             daily_status = "⛔ Brake active — new trades halted until tomorrow."
         else:
             daily_status = "✅ New trades allowed."
@@ -1392,6 +1401,9 @@ async def stats_command(
             f"Day: {daily_metrics.day}\n"
             f"Today's Realized PnL: "
             f"{_format_pnl_value(daily_metrics.realized_pnl_today)}\n"
+            f"Open Unrealized PnL: "
+            f"{_format_pnl_value(daily_metrics.open_unrealized_pnl)}\n"
+            f"Day Loss: {_format_pnl_value(daily_metrics.day_loss)}\n"
             f"Daily Loss Limit: ${daily_metrics.loss_limit:,.2f}\n"
             f"Loss Usage: {daily_metrics.loss_usage_percent:.1f}%\n"
             f"Remaining Budget: ${daily_metrics.remaining_budget:,.2f}\n"

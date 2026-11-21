@@ -64,7 +64,7 @@ state but never a token, API key or authorized id.
 | `TAKE_PROFIT_PERCENT` | `4.0` | Take-profit distance from the entry price. |
 | `PORTFOLIO_RISK_LIMIT` | 6% of balance | Maximum total open risk. |
 | `PORTFOLIO_EXPOSURE_LIMIT` | 300% of balance | Maximum total notional exposure. |
-| `PORTFOLIO_DAILY_LOSS_LIMIT` | 3% of balance | Maximum net realized daily loss. |
+| `PORTFOLIO_DAILY_LOSS_LIMIT` | 3% of balance | Maximum combined realized and floating daily loss. |
 | `PORTFOLIO_MAX_OPEN_POSITIONS` | `3` | Maximum open positions. |
 | `PORTFOLIO_MAX_POSITIONS_PER_SYMBOL` | `1` | Maximum open positions per symbol. |
 | `PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL` | 200% of balance | Maximum notional exposure per symbol. |
@@ -165,7 +165,7 @@ rejection:
 | --- | --- |
 | `PORTFOLIO_RISK_LIMIT` | Maximum total dollar risk across open positions. |
 | `PORTFOLIO_EXPOSURE_LIMIT` | Maximum total notional exposure. |
-| `PORTFOLIO_DAILY_LOSS_LIMIT` | Maximum net realized loss per calendar day; new entries halt until the next day. |
+| `PORTFOLIO_DAILY_LOSS_LIMIT` | Maximum combined realized and floating loss per calendar day; new entries halt until the next day. |
 | `PORTFOLIO_MAX_OPEN_POSITIONS` | Maximum open positions across all symbols. |
 | `PORTFOLIO_MAX_POSITIONS_PER_SYMBOL` | Maximum open positions on one symbol. |
 | `PORTFOLIO_MAX_EXPOSURE_PER_SYMBOL` | Maximum notional exposure on one symbol. |
@@ -197,6 +197,14 @@ and uses about its full value as notional.
 Stop-loss and take-profit levels are mandatory on every paper trade, and
 a disabled or stale market mark blocks new sizing rather than falling
 back to an entry price or the configured balance.
+
+The daily-loss brake tests the whole day, not just settled trades: it
+counts realized PnL for the calendar day **plus** floating PnL on open
+positions at their recorded marks. A position without a usable mark is
+never treated as zero loss — the brake fails closed and new entries are
+halted until every open position can be priced, naming the affected
+symbols. This keeps the daily budget meaningful before positions are
+closed, and it never lets an unreadable account look profitable.
 
 ### Migrating an existing `.env`
 
